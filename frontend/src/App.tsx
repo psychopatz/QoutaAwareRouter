@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, Trash2, RefreshCw, Key, ShieldCheck, AlertCircle, Copy, Check, MessageSquare, Activity, Settings } from 'lucide-react';
 import ChatInterface from './components/ChatInterface';
+import Modal from './components/Modal';
 import TrafficLogs from './components/TrafficLogs';
 
 interface ApiKey {
@@ -33,6 +34,11 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'keys' | 'chat' | 'logs'>('keys');
   const [copiedBase, setCopiedBase] = useState(false);
   const [summary, setSummary] = useState<KeySummary | null>(null);
+  const [isTestModalOpen, setIsTestModalOpen] = useState(false);
+  const [testResult, setTestResult] = useState<string | null>(null);
+  const [keyToTest, setKeyToTest] = useState<ApiKey | null>(null);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [keyToDelete, setKeyToDelete] = useState<ApiKey | null>(null);
 
   const baseUrl = `http://127.0.0.1:7317/v1`;
 
@@ -41,11 +47,11 @@ const App: React.FC = () => {
       const [keysResponse, summaryResponse] = await Promise.all([
         fetch('/admin/keys'),
         fetch('/admin/keys/summary'),
-      ]);
+        ]);
       const [keysData, summaryData] = await Promise.all([
         keysResponse.json(),
         summaryResponse.json(),
-      ]);
+        ]);
       setKeys(keysData);
       setSummary(summaryData);
     } catch (error) {
@@ -72,25 +78,42 @@ const App: React.FC = () => {
     }
   };
 
-  const deleteKey = async (id: number) => {
+  const confirmDeleteKey = (key: ApiKey) => {
+    setKeyToDelete(key);
+    setIsDeleteModalOpen(true);
+  };
+
+  const deleteKey = async () => {
+    if (!keyToDelete) return;
     try {
-      await fetch(`/admin/keys/${id}`, { method: 'DELETE' });
+      await fetch(`/admin/keys/${keyToDelete.id}`, { method: 'DELETE' });
       fetchKeys();
+      setIsDeleteModalOpen(false);
+      setKeyToDelete(null);
     } catch (error) {
       console.error('Failed to delete key', error);
+      setIsDeleteModalOpen(false);
+      setKeyToDelete(null);
     }
   };
 
-  const testKey = async (id: number) => {
+  const openTestModal = (key: ApiKey) => {
+    setKeyToTest(key);
+    setIsTestModalOpen(true);
+    runKeyTest(key.id!);
+  };
+
+  const runKeyTest = async (id: number) => {
+    setTestResult('Testing...');
     try {
       const response = await fetch(`/admin/keys/${id}/test`, { method: 'POST' });
       const data = await response.json();
       const message = data.message || data.detail || data.error?.message || 'Unknown test result';
-      alert(`Test Result:\n${message}`);
+      setTestResult(message);
       fetchKeys();
     } catch (error) {
       console.error('Failed to test key', error);
-      alert('Error: Failed to connect to server');
+      setTestResult('Error: Failed to connect to server');
     }
   };
 
@@ -105,6 +128,17 @@ const App: React.FC = () => {
     const interval = setInterval(fetchKeys, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (isTestModalOpen && testResult && testResult !== 'Testing...') {
+      const timer = setTimeout(() => {
+        setIsTestModalOpen(false);
+        setTestResult(null);
+        setKeyToTest(null);
+      }, 6000); // Autoclose after 6 seconds
+      return () => clearTimeout(timer);
+    }
+  }, [isTestModalOpen, testResult]);
 
   const groupedKeys = keys.reduce((acc, key) => {
     if (!acc[key.service]) acc[key.service] = [];
@@ -142,7 +176,7 @@ const App: React.FC = () => {
               <p className="text-[10px] text-slate-500 uppercase font-bold tracking-wider mb-0.5">LLM Server Base URL</p>
               <code className="text-brand-400 text-sm font-mono">{baseUrl}</code>
             </div>
-            <button 
+            <button
               onClick={copyToClipboard}
               className="p-2 hover:bg-white/10 rounded-lg transition-all text-slate-400 hover:text-white"
             >
@@ -152,21 +186,21 @@ const App: React.FC = () => {
         </div>
 
         <nav className="flex gap-2 p-1.5 glass-card bg-slate-900/50 w-fit mx-auto md:mx-0">
-          <button 
+          <button
             onClick={() => setActiveTab('keys')}
             className={`flex items-center gap-2 px-6 py-2 rounded-xl transition-all ${activeTab === 'keys' ? 'bg-brand-600 text-white shadow-lg shadow-brand-600/20' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}`}
           >
             <Settings className="w-4 h-4" />
             Keys
           </button>
-          <button 
+          <button
             onClick={() => setActiveTab('chat')}
             className={`flex items-center gap-2 px-6 py-2 rounded-xl transition-all ${activeTab === 'chat' ? 'bg-brand-600 text-white shadow-lg shadow-brand-600/20' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}`}
           >
             <MessageSquare className="w-4 h-4" />
             Chat Test
           </button>
-          <button 
+          <button
             onClick={() => setActiveTab('logs')}
             className={`flex items-center gap-2 px-6 py-2 rounded-xl transition-all ${activeTab === 'logs' ? 'bg-brand-600 text-white shadow-lg shadow-brand-600/20' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}`}
           >
@@ -219,7 +253,7 @@ const App: React.FC = () => {
                 Add New API Key
               </h2>
               <form onSubmit={addKey} className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <select 
+                <select
                   className="input-field"
                   value={newKey.service}
                   onChange={(e) => setNewKey({ ...newKey, service: e.target.value })}
@@ -229,7 +263,7 @@ const App: React.FC = () => {
                   <option value="openrouter">OpenRouter</option>
                   <option value="openai">OpenAI Compatible</option>
                 </select>
-                <input 
+                <input
                   type="password"
                   placeholder="Enter API Key"
                   className="input-field"
@@ -278,8 +312,17 @@ const App: React.FC = () => {
                         }`}
                       >
                         <div className="flex items-start justify-between mb-4">
-                          <div className="bg-white/5 p-2 rounded-lg">
-                            <Key className="w-5 h-5 text-brand-300" />
+                          <div className="flex items-center gap-2">
+                            <div className="bg-white/5 p-2 rounded-lg">
+                              <Key className="w-5 h-5 text-brand-300" />
+                            </div>
+                            <button
+                              onClick={() => openTestModal(key)}
+                              className="text-emerald-400 hover:text-emerald-300 p-2 rounded-lg hover:bg-emerald-400/10 transition-all"
+                              title="Test Key"
+                            >
+                              <Activity className="w-4 h-4" />
+                            </button>
                           </div>
                           <div className="flex flex-col items-end gap-2">
                             {isCurrent && (
@@ -333,18 +376,11 @@ const App: React.FC = () => {
                             )}
                           </div>
                         )}
-                        <button 
-                          onClick={() => deleteKey(key.id!)}
+                        <button
+                          onClick={() => confirmDeleteKey(key)}
                           className="absolute bottom-4 right-4 text-slate-500 hover:text-rose-400 p-2 rounded-lg hover:bg-rose-400/10 transition-all opacity-0 group-hover:opacity-100"
                         >
                           <Trash2 className="w-4 h-4" />
-                        </button>
-                        <button 
-                          onClick={() => testKey(key.id!)}
-                          className="absolute bottom-4 right-14 text-slate-500 hover:text-emerald-400 p-2 rounded-lg hover:bg-emerald-400/10 transition-all opacity-0 group-hover:opacity-100"
-                          title="Test Key"
-                        >
-                          <Activity className="w-4 h-4" />
                         </button>
                       </div>
                         );
@@ -363,6 +399,35 @@ const App: React.FC = () => {
 
         {activeTab === 'chat' && <ChatInterface />}
         {activeTab === 'logs' && <TrafficLogs />}
+
+        <Modal isOpen={isTestModalOpen} onClose={() => setIsTestModalOpen(false)} title="Test API Key">
+          {keyToTest && (
+            <div className="space-y-4">
+              <p>Testing key for service: <span className="font-semibold capitalize">{formatServiceLabel(keyToTest.service)}</span></p>
+              <p>Key Suffix: <code className="font-mono">••••••••{keyToTest.key.slice(-4)}</code></p>
+              <p className="font-semibold">Result:</p>
+              <div className="bg-slate-700 p-3 rounded-md font-mono text-sm overflow-x-auto">
+                {testResult}
+              </div>
+            </div>
+          )}
+          <div className="flex justify-end space-x-2 mt-4">
+            <button onClick={() => setIsTestModalOpen(false)} className="btn-secondary">Close</button>
+          </div>
+        </Modal>
+
+        <Modal isOpen={isDeleteModalOpen} onClose={() => setIsDeleteModalOpen(false)} title="Confirm Deletion">
+          {keyToDelete && (
+            <div className="space-y-4">
+              <p>Are you sure you want to delete the API key for <span className="font-semibold capitalize">{formatServiceLabel(keyToDelete.service)}</span> with suffix <code className="font-mono">••••••••{keyToDelete.key.slice(-4)}</code>?</p>
+              <p className="text-sm text-rose-300">This action cannot be undone.</p>
+            </div>
+          )}
+          <div className="flex justify-end space-x-2 mt-4">
+            <button onClick={() => setIsDeleteModalOpen(false)} className="btn-secondary">Cancel</button>
+            <button onClick={deleteKey} className="btn-danger">Delete</button>
+          </div>
+        </Modal>
       </main>
     </div>
   );

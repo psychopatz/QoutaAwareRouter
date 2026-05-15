@@ -162,7 +162,27 @@ class OllamaCloudProvider(BaseProvider):
                     "finish_reason": "stop" if data.get("done") else None
                 }]
             }
-            return f"data: {json.dumps(chunk)}\n\n".encode()
+            res = f"data: {json.dumps(chunk)}\n\n"
+            
+            if data.get("done"):
+                # Append usage chunk immediately after
+                prompt_tokens = data.get("prompt_eval_count", 0)
+                completion_tokens = data.get("eval_count", 0)
+                usage_chunk = {
+                    "id": chunk["id"],
+                    "object": "chat.completion.chunk",
+                    "created": chunk["created"],
+                    "model": chunk["model"],
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens
+                    }
+                }
+                res += f"data: {json.dumps(usage_chunk)}\n\n"
+                
+            return res.encode()
         except Exception:
             return b""
 

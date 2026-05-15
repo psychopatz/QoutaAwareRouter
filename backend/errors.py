@@ -7,6 +7,7 @@ class ErrorType(str, Enum):
     ALL_PROVIDERS_UNAVAILABLE = "all_providers_unavailable"
     QUOTA_LIMITED = "quota_limited"
     RATE_LIMITED = "rate_limited"
+    UNSUPPORTED_FEATURE = "unsupported_feature"
     AUTH_FAILED = "auth_failed"
     MISSING_API_KEY = "missing_api_key"
     CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded"

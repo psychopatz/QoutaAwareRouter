@@ -5,7 +5,7 @@ from .logging_config import setup_logging
 from .config_loader import ConfigLoader
 from .routing.model_aliases import ModelAliasManager
 from .routing.router import Router
-from .api import health, openai_compat, admin, logs
+from .api import health, openai_compat, responses_compat, admin, logs
 
 app = FastAPI(title="Quota Aware LLM Router", version="0.1.0")
 
@@ -22,10 +22,12 @@ def init_app():
     
     # Inject Router into API modules
     openai_compat.set_router(router_instance)
+    responses_compat.set_router(router_instance)
     
     # Include Routers
     app.include_router(health.router, tags=["Health"])
     app.include_router(openai_compat.router, prefix="/v1", tags=["OpenAI Compatibility"])
+    app.include_router(responses_compat.router, prefix="/v1", tags=["OpenAI Compatibility"])
     app.include_router(admin.router, prefix="/admin", tags=["Admin"])
     app.include_router(logs.router, prefix="/admin", tags=["Admin"])
 

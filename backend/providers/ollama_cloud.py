@@ -6,12 +6,33 @@ from .base import BaseProvider, ProviderModel, ProviderHealth
 from ..schemas import ChatCompletionRequest, ChatCompletionResponse, ResponseMessage, Choice, Usage, ProviderMetadata
 from ..errors import GatewayError, ErrorType
 from ..logging_config import logger
+from .openai_compatible import (
+    ProviderCapabilities,
+    convert_messages_to_ollama,
+    ensure_supported_request,
+    extract_reasoning_mode,
+    normalize_tool_calls_from_ollama,
+    ollama_response_format,
+)
 
 class OllamaCloudProvider(BaseProvider):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.base_url = self.config.get("base_url", "https://ollama.com").rstrip("/")
         self.api_key = self.config.get("api_key") or self.config.get("api_key_env")
+        self._models_cache = {"timestamp": 0.0, "models": []}
+
+    def default_capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            supports_tools=True,
+            supports_tool_choice=False,
+            supports_parallel_tool_calls=False,
+            supports_vision_input=True,
+            supports_audio_input=False,
+            supports_audio_output=False,
+            supports_reasoning=True,
+            supports_response_format=True,
+        )
 
     def _get_headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -24,12 +45,28 @@ class OllamaCloudProvider(BaseProvider):
         return headers
 
     async def list_models(self) -> List[ProviderModel]:
+        if time.time() - self._models_cache["timestamp"] < 300 and self._models_cache["models"]:
+            return self._models_cache["models"]
+
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.get(f"{self.base_url}/api/tags", headers=self._get_headers())
                 response.raise_for_status()
                 data = response.json()
-                return [ProviderModel(id=m["name"], name=m["name"]) for m in data.get("models", [])]
+                models = []
+                for model_data in data.get("models", []):
+                    details = model_data.get("details") or {}
+                    models.append(
+                        ProviderModel(
+                            id=model_data["name"],
+                            name=model_data["name"],
+                            capabilities=self.capabilities.model_copy(),
+                            raw={"details": details, "digest": model_data.get("digest")},
+                        )
+                    )
+
+                self._models_cache = {"timestamp": time.time(), "models": models}
+                return models
         except Exception as e:
             logger.error(f"Failed to list models for provider {self.id}: {e}")
             return []
@@ -82,29 +119,10 @@ class OllamaCloudProvider(BaseProvider):
                         yield self.convert_stream_chunk(line.encode())
 
     def convert_request(self, openai_request: ChatCompletionRequest) -> Dict[str, Any]:
-        messages = []
-        for m in openai_request.messages:
-            msg = {"role": m.role}
-            if isinstance(m.content, str):
-                msg["content"] = m.content
-            elif isinstance(m.content, list):
-                text_parts = []
-                images = []
-                for part in m.content:
-                    if part.get("type") == "text":
-                        text_parts.append(part.get("text", ""))
-                    elif part.get("type") == "image_url":
-                        url = part.get("image_url", {}).get("url", "")
-                        if url.startswith("data:image"):
-                            # Extract base64 part from 'data:image/jpeg;base64,...'
-                            b64 = url.split(",", 1)[-1]
-                            images.append(b64)
-                msg["content"] = "\n".join(text_parts)
-                if images:
-                    msg["images"] = images
-            messages.append(msg)
+        ensure_supported_request(openai_request, self.capabilities, self.id)
+        messages = convert_messages_to_ollama(openai_request.messages)
 
-        return {
+        payload = {
             "model": openai_request.model,
             "messages": messages,
             "stream": False,  # Default to false, overridden in stream_chat_completion
@@ -112,13 +130,31 @@ class OllamaCloudProvider(BaseProvider):
                 "temperature": openai_request.temperature,
                 "top_p": openai_request.top_p,
                 "stop": openai_request.stop,
-                "num_predict": openai_request.max_tokens,
+                "num_predict": openai_request.max_completion_tokens or openai_request.max_tokens,
             }
         }
+        
+        if openai_request.tools and openai_request.tool_choice != "none":
+            payload["tools"] = openai_request.tools
+
+        response_format = ollama_response_format(openai_request)
+        if response_format is not None:
+            payload["format"] = response_format
+
+        reasoning_mode = extract_reasoning_mode(openai_request)
+        if reasoning_mode is not None:
+            payload["think"] = reasoning_mode
+            
+        return payload
 
     def convert_response(self, provider_response: Dict[str, Any], model: str) -> ChatCompletionResponse:
         # Ollama /api/chat response:
         # { "model": "...", "message": {"role": "assistant", "content": "..."}, "done": True, ... }
+        message_data = provider_response.get("message", {})
+        
+        tool_calls = normalize_tool_calls_from_ollama(message_data.get("tool_calls"))
+        reasoning = message_data.get("thinking")
+                    
         return ChatCompletionResponse(
             id=f"chatcmpl-qarouter-{int(time.time())}",
             created=int(time.time()),
@@ -132,16 +168,18 @@ class OllamaCloudProvider(BaseProvider):
                 Choice(
                     index=0,
                     message=ResponseMessage(
-                        role=provider_response["message"]["role"],
-                        content=provider_response["message"]["content"]
+                        role=message_data.get("role", "assistant"),
+                        content=message_data.get("content"),
+                        tool_calls=tool_calls,
+                        reasoning=reasoning,
                     ),
-                    finish_reason="stop" if provider_response.get("done") else None
+                    finish_reason="tool_calls" if tool_calls else (provider_response.get("done_reason") or ("stop" if provider_response.get("done") else None))
                 )
             ],
             usage=Usage(
                 prompt_tokens=provider_response.get("prompt_eval_count"),
                 completion_tokens=provider_response.get("eval_count"),
-                total_tokens=None
+                total_tokens=(provider_response.get("prompt_eval_count") or 0) + (provider_response.get("eval_count") or 0)
             )
         )
 
@@ -149,8 +187,17 @@ class OllamaCloudProvider(BaseProvider):
         # Ollama NDJSON: {"model":"...","message":{"role":"assistant","content":"..."},"done":false}
         try:
             data = json.loads(provider_chunk)
-            content = data.get("message", {}).get("content", "")
+            message_data = data.get("message", {})
+            content = message_data.get("content", "")
             
+            tool_calls = normalize_tool_calls_from_ollama(message_data.get("tool_calls"))
+            
+            delta = {"content": content}
+            if tool_calls:
+                delta["tool_calls"] = tool_calls
+            if message_data.get("thinking"):
+                delta["reasoning"] = message_data.get("thinking")
+                
             chunk = {
                 "id": f"chatcmpl-qarouter-{int(time.time())}",
                 "object": "chat.completion.chunk",
@@ -158,8 +205,8 @@ class OllamaCloudProvider(BaseProvider):
                 "model": data.get("model", ""),
                 "choices": [{
                     "index": 0,
-                    "delta": {"content": content},
-                    "finish_reason": "stop" if data.get("done") else None
+                    "delta": delta,
+                    "finish_reason": "tool_calls" if tool_calls else ("stop" if data.get("done") else None)
                 }]
             }
             res = f"data: {json.dumps(chunk)}\n\n"
@@ -181,6 +228,7 @@ class OllamaCloudProvider(BaseProvider):
                     }
                 }
                 res += f"data: {json.dumps(usage_chunk)}\n\n"
+                res += "data: [DONE]\n\n"
                 
             return res.encode()
         except Exception:

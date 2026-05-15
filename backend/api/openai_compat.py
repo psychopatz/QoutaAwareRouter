@@ -54,7 +54,13 @@ async def list_models(service_type: str = None):
                 "id": f"{p_type}/{m.id}",
                 "object": "model",
                 "created": int(now),
-                "owned_by": p_type
+                "owned_by": p_type,
+                "context_length": m.context_length,
+                "max_completion_tokens": m.max_completion_tokens,
+                "input_modalities": m.input_modalities,
+                "output_modalities": m.output_modalities,
+                "supported_parameters": m.supported_parameters,
+                "capabilities": m.capabilities.model_dump() if m.capabilities else None,
             }
             all_models.append(model_obj)
             if p_type not in by_service:

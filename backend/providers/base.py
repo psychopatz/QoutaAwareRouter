@@ -1,12 +1,20 @@
 from abc import ABC, abstractmethod
 from typing import List, AsyncIterator, Optional, Dict, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from ..schemas import ChatCompletionRequest, ChatCompletionResponse
 from ..errors import GatewayError
+from .openai_compatible import ProviderCapabilities, combine_capabilities, ensure_supported_request
 
 class ProviderModel(BaseModel):
     id: str
     name: str
+    context_length: Optional[int] = None
+    max_completion_tokens: Optional[int] = None
+    input_modalities: List[str] = Field(default_factory=list)
+    output_modalities: List[str] = Field(default_factory=list)
+    supported_parameters: List[str] = Field(default_factory=list)
+    capabilities: Optional[ProviderCapabilities] = None
+    raw: Dict[str, Any] = Field(default_factory=dict)
 
 class ProviderHealth(BaseModel):
     healthy: bool
@@ -37,6 +45,51 @@ class BaseProvider(ABC):
         self.timeout_seconds = timeout_seconds
         self.cooldown_on_429_seconds = cooldown_on_429_seconds
         self.config = kwargs
+        self.capabilities = self.default_capabilities().model_copy(
+            update=self.config.get("capabilities", {})
+        )
+        self.model_capability_overrides = self.config.get("model_capabilities", {})
+
+    def default_capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities()
+
+    def _get_model_capability_override(self, model_id: str) -> Dict[str, Any]:
+        return (
+            self.model_capability_overrides.get(model_id)
+            or self.model_capability_overrides.get("*")
+            or {}
+        )
+
+    async def get_model_info(self, model_id: str) -> Optional[ProviderModel]:
+        try:
+            for model in await self.list_models():
+                if model.id == model_id:
+                    return model
+        except Exception:
+            return None
+        return None
+
+    def effective_capabilities_for_model(
+        self,
+        model_id: str,
+        model_info: Optional[ProviderModel] = None,
+    ) -> ProviderCapabilities:
+        capabilities = self.capabilities.model_copy()
+
+        if model_info and model_info.capabilities is not None:
+            capabilities = combine_capabilities(capabilities, model_info.capabilities, mode="narrow")
+
+        capability_override = self._get_model_capability_override(model_id)
+        if capability_override:
+            capabilities = capabilities.model_copy(update=capability_override)
+
+        return capabilities
+
+    async def validate_model_request(self, model_id: str, request: ChatCompletionRequest) -> ProviderCapabilities:
+        model_info = await self.get_model_info(model_id)
+        capabilities = self.effective_capabilities_for_model(model_id, model_info)
+        ensure_supported_request(request, capabilities, f"{self.id}/{model_id}")
+        return capabilities
 
     @abstractmethod
     async def list_models(self) -> List[ProviderModel]:

@@ -1,15 +1,35 @@
+import time
 from typing import List, AsyncIterator, Dict, Any
 import httpx
 
 from .base import BaseProvider, ProviderModel, ProviderHealth
 from ..schemas import ChatCompletionRequest, ChatCompletionResponse
 from ..errors import GatewayError
+from .openai_compatible import (
+    ProviderCapabilities,
+    build_openai_chat_payload,
+    ensure_supported_request,
+    infer_capabilities_from_model_metadata,
+)
 
 class OpenRouterProvider(BaseProvider):
     def __init__(self, **kwargs):
         kwargs.setdefault('supports_streaming', True)
         super().__init__(**kwargs)
         self.base_url = self.config.get("base_url", "https://openrouter.ai/api/v1")
+        self._models_cache = {"timestamp": 0.0, "models": []}
+
+    def default_capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            supports_tools=True,
+            supports_tool_choice=True,
+            supports_parallel_tool_calls=True,
+            supports_vision_input=True,
+            supports_audio_input=True,
+            supports_audio_output=True,
+            supports_reasoning=True,
+            supports_response_format=True,
+        )
         
     @property
     def api_key(self) -> str:
@@ -25,12 +45,42 @@ class OpenRouterProvider(BaseProvider):
         }
         
     async def list_models(self) -> List[ProviderModel]:
+        if time.time() - self._models_cache["timestamp"] < 300 and self._models_cache["models"]:
+            return self._models_cache["models"]
+
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"{self.base_url}/models", headers=self.headers, timeout=10.0)
             if resp.status_code != 200:
                 raise self.normalize_error(ValueError(f"Status {resp.status_code}: {resp.text}"))
             data = resp.json()
-            return [ProviderModel(id=m["id"], name=m.get("name", m["id"])) for m in data.get("data", [])]
+            models = []
+            for model_data in data.get("data", []):
+                architecture = model_data.get("architecture") or {}
+                top_provider = model_data.get("top_provider") or {}
+                supported_parameters = model_data.get("supported_parameters") or []
+                input_modalities = architecture.get("input_modalities") or []
+                output_modalities = architecture.get("output_modalities") or []
+
+                models.append(
+                    ProviderModel(
+                        id=model_data["id"],
+                        name=model_data.get("name", model_data["id"]),
+                        context_length=model_data.get("context_length") or top_provider.get("context_length"),
+                        max_completion_tokens=top_provider.get("max_completion_tokens"),
+                        input_modalities=input_modalities,
+                        output_modalities=output_modalities,
+                        supported_parameters=supported_parameters,
+                        capabilities=infer_capabilities_from_model_metadata(
+                            supported_parameters=supported_parameters,
+                            input_modalities=input_modalities,
+                            output_modalities=output_modalities,
+                        ),
+                        raw=model_data,
+                    )
+                )
+
+            self._models_cache = {"timestamp": time.time(), "models": models}
+            return models
             
     async def health_check(self) -> ProviderHealth:
         try:
@@ -44,10 +94,18 @@ class OpenRouterProvider(BaseProvider):
             return ProviderHealth(healthy=False, message=str(e))
             
     def convert_request(self, req: ChatCompletionRequest) -> Dict[str, Any]:
-        return req.model_dump(exclude_unset=True)
+        ensure_supported_request(req, self.capabilities, self.id)
+        return build_openai_chat_payload(req)
         
     def convert_response(self, resp: Dict[str, Any], model: str) -> ChatCompletionResponse:
-        return ChatCompletionResponse(**resp)
+        response_payload = dict(resp)
+        response_payload["model"] = model
+        response_payload["provider"] = {
+            "id": self.id,
+            "type": self.type,
+            "actual_model": resp.get("model", model),
+        }
+        return ChatCompletionResponse(**response_payload)
         
     def convert_stream_chunk(self, chunk: bytes) -> bytes:
         # Simply proxy SSE stream chunks
@@ -66,7 +124,7 @@ class OpenRouterProvider(BaseProvider):
             return self.convert_response(resp.json(), request.model)
             
     async def stream_chat_completion(self, request: ChatCompletionRequest) -> AsyncIterator[bytes]:
-        request.stream = True
+        request = request.model_copy(update={"stream": True})
         async with httpx.AsyncClient() as client:
             async with client.stream(
                 "POST", 

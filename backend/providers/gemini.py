@@ -831,6 +831,7 @@ class GeminiProvider(BaseProvider):
 				stream_control.register_cancel_callback(abort_stream, native_supported=True)
 
 			if response.status_code != 200:
+				await response.aread()
 				raise self.normalize_error(response)
 
 			async for chunk in response.aiter_bytes():
@@ -869,6 +870,7 @@ class GeminiProvider(BaseProvider):
 				stream_control.register_cancel_callback(abort_stream, native_supported=True)
 
 			if response.status_code != 200:
+				await response.aread()
 				raise self.normalize_error(response)
 
 			async for line in response.aiter_lines():

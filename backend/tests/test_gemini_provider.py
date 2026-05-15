@@ -312,6 +312,39 @@ async def test_gemini_stream_with_google_options_uses_native_stream_endpoint(mon
 
 
 @pytest.mark.asyncio
+async def test_gemini_stream_error_reads_body_before_normalizing(monkeypatch):
+	original_async_client = httpx.AsyncClient
+
+	def handler(request: httpx.Request) -> httpx.Response:
+		assert request.method == "POST"
+		assert request.url.path == "/v1beta/openai/chat/completions"
+		return httpx.Response(
+			401,
+			json={"error": {"message": "Gemini key rejected"}},
+		)
+
+	transport = httpx.MockTransport(handler)
+
+	def build_client(*args, **kwargs):
+		return original_async_client(transport=transport)
+
+	monkeypatch.setattr("backend.providers.gemini.httpx.AsyncClient", build_client)
+
+	provider = GeminiProvider(id="gemini-primary", type="gemini", api_key="gm-test-key")
+	request = ChatCompletionRequest(
+		model="gemini-2.5-flash",
+		messages=[{"role": "user", "content": "Hello"}],
+	)
+
+	with pytest.raises(Exception) as exc_info:
+		async for _chunk in provider.stream_chat_completion(request):
+			pass
+
+	assert "Attempted to access streaming response content" not in str(exc_info.value)
+	assert "Gemini key rejected" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_gemini_tts_audio_output_request_uses_native_speech_config(monkeypatch):
 	original_async_client = httpx.AsyncClient
 

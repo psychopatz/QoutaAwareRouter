@@ -33,6 +33,7 @@ interface ChatMessage {
   audio?: AudioPayload | null;
   reasoning?: string | null;
   refusal?: string | null;
+  image?: string | null;
 }
 
 interface GeminiSpeakerConfig {
@@ -103,6 +104,7 @@ const ChatInterface: React.FC = () => {
     { speaker: 'Speaker1', voice: 'Kore' },
     { speaker: 'Speaker2', voice: 'Puck' },
   ]);
+  const [showGeminiSettings, setShowGeminiSettings] = useState(false);
 
   const trimServicePrefix = (service: string, modelId: string) => {
     const prefix = `${service}/`;
@@ -408,6 +410,15 @@ const ChatInterface: React.FC = () => {
           <div className="flex items-center gap-2">
             <Bot className="w-5 h-5 text-brand-400" />
             <span className="font-medium">Chat Tester</span>
+            {selectedService === 'gemini' && (
+              <button
+                type="button"
+                onClick={() => setShowGeminiSettings(!showGeminiSettings)}
+                className="ml-2 rounded-full bg-white/5 px-3 py-1 text-xs text-slate-300 hover:bg-white/10"
+              >
+                {showGeminiSettings ? 'Hide Gemini Settings' : 'Show Gemini Settings'}
+              </button>
+            )}
           </div>
           <p className="text-xs text-slate-500 mt-1">
             {lastProvider?.id ? `Last routed via ${lastProvider.id}${lastProvider.actual_model ? ` · ${lastProvider.actual_model}` : ''}` : 'No routed provider yet'}
@@ -418,7 +429,7 @@ const ChatInterface: React.FC = () => {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <select 
+          <select
             className="input-field py-1 text-sm bg-slate-800"
             value={selectedService}
             onChange={(e) => handleServiceChange(e.target.value)}
@@ -471,7 +482,7 @@ const ChatInterface: React.FC = () => {
               </div>
             )}
           </div>
-          <button 
+          <button
             onClick={handleCopyModel}
             className="p-2 hover:bg-white/10 rounded-lg transition-all text-slate-400 hover:text-white border border-white/10"
             title="Copy Model ID"
@@ -481,7 +492,7 @@ const ChatInterface: React.FC = () => {
         </div>
       </div>
 
-      {selectedService === 'gemini' && (
+      {selectedService === 'gemini' && showGeminiSettings && (
         <div className="border-b border-white/10 bg-white/[0.03] px-4 py-3">
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
             <input

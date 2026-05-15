@@ -3,6 +3,7 @@ from .traffic import traffic_manager, TrafficLog
 from ..schemas import ChatCompletionRequest, ChatCompletionResponse
 from ..errors import GatewayError, ErrorType
 from ..logging_config import logger
+from ..streaming.control import ProviderStreamControl
 import time
 import uuid
 
@@ -189,7 +190,7 @@ class Router:
         
         raise GatewayError(f"No healthy providers found for model '{request.model}'", type=ErrorType.ALL_PROVIDERS_UNAVAILABLE, status_code=503)
 
-    async def iter_stream(self, request: ChatCompletionRequest, on_provider_selected=None):
+    async def iter_stream(self, request: ChatCompletionRequest, on_provider_selected=None, stream_control: ProviderStreamControl = None):
         import json
 
         requested_model = request.model
@@ -242,7 +243,7 @@ class Router:
                                 }
                             )
                         
-                        async for chunk in provider.stream_chat_completion(provider_request):
+                        async for chunk in provider.stream_chat_completion(provider_request, stream_control=stream_control):
                             chunks_yielded = True
                             if chunk:
                                 yield chunk
@@ -260,6 +261,9 @@ class Router:
                         return
                         
                     except Exception as general_e:
+                        if stream_control is not None and stream_control.cancelled:
+                            return
+
                         # Wrap non-gateway errors
                         e = general_e if isinstance(general_e, GatewayError) else GatewayError(str(general_e), provider_id=provider.id)
                         

@@ -14,6 +14,7 @@ from backend.routing.model_aliases import ModelAliasManager
 from backend.routing.router import Router
 from backend.schemas import ChatCompletionResponse, Choice, ProviderMetadata, ResponseMessage, Usage, ChatCompletionRequest
 from backend.storage.responses import response_store
+from backend.streaming.control import ProviderStreamControl
 
 
 class FakeProvider(BaseProvider):
@@ -58,7 +59,61 @@ class FakeProvider(BaseProvider):
             usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
         )
 
-    async def stream_chat_completion(self, request: ChatCompletionRequest):
+    async def stream_chat_completion(self, request: ChatCompletionRequest, stream_control: ProviderStreamControl = None):
+        yield b""
+
+    def convert_request(self, openai_request: ChatCompletionRequest):
+        return {}
+
+    def convert_response(self, provider_response, model: str):
+        raise NotImplementedError
+
+    def convert_stream_chunk(self, provider_chunk: bytes):
+        return provider_chunk
+
+    def normalize_error(self, error):
+        raise error
+
+
+
+def test_responses_streaming_emits_multimodal_content_part_events(registry_backup):
+    class FakeRouter:
+        async def route(self, request: ChatCompletionRequest):
+            raise AssertionError("non-stream route should not be called")
+
+        async def iter_stream(self, request: ChatCompletionRequest, on_provider_selected=None, stream_control=None):
+            if on_provider_selected:
+                on_provider_selected(
+                    {
+                        "id": "openrouter-primary",
+                        "type": "openrouter",
+                        "actual_model": "openai/gpt-4o-audio",
+                    }
+                )
+
+            async def generator():
+                yield b'data: {"id":"chat_2","object":"chat.completion.chunk","created":123,"model":"default","choices":[{"index":0,"delta":{"reasoning":"Think","audio":{"data":"abc","transcript":"Hi"},"refusal":"Nope"},"finish_reason":null}]}\n\n'
+                yield b'data: {"id":"chat_2","object":"chat.completion.chunk","created":123,"model":"default","choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}\n\n'
+                yield b'data: [DONE]\n\n'
+
+            return generator()
+
+    app = FastAPI()
+    responses_compat.set_router(FakeRouter())
+    app.include_router(responses_compat.router, prefix="/v1")
+    client = TestClient(app)
+
+    with client.stream("POST", "/v1/responses", json={"model": "default", "input": "hello", "stream": True}) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert "event: response.reasoning.delta" in body
+    assert "event: response.reasoning.done" in body
+    assert "event: response.output_audio.delta" in body
+    assert "event: response.output_audio.done" in body
+    assert "event: response.refusal.delta" in body
+    assert "event: response.refusal.done" in body
+    async def stream_chat_completion(self, request: ChatCompletionRequest, stream_control: ProviderStreamControl = None):
         yield b""
 
     def convert_request(self, openai_request: ChatCompletionRequest):
@@ -250,7 +305,7 @@ def test_responses_streaming_translates_chat_stream(registry_backup):
         async def route(self, request: ChatCompletionRequest):
             raise AssertionError("non-stream route should not be called")
 
-        async def iter_stream(self, request: ChatCompletionRequest, on_provider_selected=None):
+        async def iter_stream(self, request: ChatCompletionRequest, on_provider_selected=None, stream_control=None):
             if on_provider_selected:
                 on_provider_selected(
                     {
@@ -279,6 +334,8 @@ def test_responses_streaming_translates_chat_stream(registry_backup):
     assert response.status_code == 200
     assert "event: response.created" in body
     assert "event: response.output_text.delta" in body
+    assert "event: response.content_part.added" in body
+    assert "event: response.content_part.done" in body
     assert "event: response.completed" in body
     assert '"output_text": "Hello"' in body
 
@@ -311,11 +368,13 @@ def test_responses_cancel_endpoint_marks_pending_response(registry_backup):
 
 @pytest.mark.asyncio
 async def test_responses_stream_emits_cancelled_event(registry_backup):
+    cancel_called = asyncio.Event()
+
     class FakeRouter:
         async def route(self, request: ChatCompletionRequest):
             raise AssertionError("non-stream route should not be called")
 
-        async def iter_stream(self, request: ChatCompletionRequest, on_provider_selected=None):
+        async def iter_stream(self, request: ChatCompletionRequest, on_provider_selected=None, stream_control=None):
             if on_provider_selected:
                 on_provider_selected(
                     {
@@ -325,12 +384,15 @@ async def test_responses_stream_emits_cancelled_event(registry_backup):
                     }
                 )
 
+            if stream_control is not None:
+                async def cancel_hook():
+                    cancel_called.set()
+
+                stream_control.register_cancel_callback(cancel_hook, native_supported=True)
+
             async def generator():
                 yield b'data: {"id":"chat_1","object":"chat.completion.chunk","created":123,"model":"default","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}\n\n'
-                await asyncio.sleep(0.1)
-                yield b'data: {"id":"chat_1","object":"chat.completion.chunk","created":123,"model":"default","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}\n\n'
-                yield b'data: [DONE]\n\n'
-
+                await cancel_called.wait()
             return generator()
 
     responses_compat.set_router(FakeRouter())
@@ -346,7 +408,9 @@ async def test_responses_stream_emits_cancelled_event(registry_backup):
     remaining = [chunk async for chunk in stream]
     body = b"".join([created, in_progress, *remaining]).decode()
 
+    assert cancel_called.is_set()
     assert "event: response.cancelled" in body
+    assert '"provider_cancel_supported": true' in body
     response_store.clear_cancel(response_id)
 
 

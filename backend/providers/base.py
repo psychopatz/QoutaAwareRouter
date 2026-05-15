@@ -3,6 +3,7 @@ from typing import List, AsyncIterator, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from ..schemas import ChatCompletionRequest, ChatCompletionResponse
 from ..errors import GatewayError
+from ..streaming.control import ProviderStreamControl
 from .openai_compatible import ProviderCapabilities, combine_capabilities, ensure_supported_request
 
 class ProviderModel(BaseModel):
@@ -107,7 +108,11 @@ class BaseProvider(ABC):
         pass
 
     @abstractmethod
-    async def stream_chat_completion(self, request: ChatCompletionRequest) -> AsyncIterator[bytes]:
+    async def stream_chat_completion(
+        self,
+        request: ChatCompletionRequest,
+        stream_control: Optional[ProviderStreamControl] = None,
+    ) -> AsyncIterator[bytes]:
         """Send a streaming chat completion request."""
         pass
 

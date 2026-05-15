@@ -95,7 +95,11 @@ curl http://127.0.0.1:7317/v1/responses \
 
 Streaming clients can send `"stream": true` and receive Responses-style SSE events such as `response.created`, `response.output_text.delta`, `response.output_item.done`, `response.completed`, and `response.cancelled`.
 
+The bridge now also emits broader content-part events for richer outputs, including `response.content_part.added`, `response.content_part.done`, `response.reasoning.delta`, `response.reasoning.done`, `response.output_audio.delta`, `response.output_audio.done`, `response.refusal.delta`, and `response.refusal.done` when the upstream provider returns those deltas.
+
 Stored responses can be fetched with `GET /v1/responses/{response_id}` and cancelled in-flight with `POST /v1/responses/{response_id}/cancel`. Follow-up turns can send `previous_response_id` to reuse the stored conversation state without rebuilding the full prior message history client-side.
+
+For provider-side cancellation, OpenRouter streaming requests now use upstream abort semantics when a response is cancelled. Ollama streaming requests use a best-effort transport close, but Ollama does not currently expose a documented dedicated generation-cancel endpoint for `/api/chat`.
 
 ## Project Structure
 

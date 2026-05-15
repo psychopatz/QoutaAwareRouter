@@ -6,6 +6,7 @@ from .base import BaseProvider, ProviderModel, ProviderHealth
 from ..schemas import ChatCompletionRequest, ChatCompletionResponse, ResponseMessage, Choice, Usage, ProviderMetadata
 from ..errors import GatewayError, ErrorType
 from ..logging_config import logger
+from ..streaming.control import ProviderStreamControl
 from .openai_compatible import (
     ProviderCapabilities,
     convert_messages_to_ollama,
@@ -99,24 +100,47 @@ class OllamaCloudProvider(BaseProvider):
         except httpx.HTTPError as e:
             raise self.normalize_error(e)
 
-    async def stream_chat_completion(self, request: ChatCompletionRequest) -> AsyncIterator[bytes]:
+    async def stream_chat_completion(
+        self,
+        request: ChatCompletionRequest,
+        stream_control: Optional[ProviderStreamControl] = None,
+    ) -> AsyncIterator[bytes]:
         payload = self.convert_request(request)
         payload["stream"] = True
-        
-        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            async with client.stream(
-                "POST", 
-                f"{self.base_url}/api/chat", 
-                json=payload, 
-                headers=self._get_headers()
-            ) as response:
-                if response.status_code != 200:
-                    error_text = await response.aread()
-                    raise GatewayError(f"Ollama Cloud error: {error_text.decode()}", status_code=response.status_code)
-                
-                async for line in response.aiter_lines():
-                    if line:
-                        yield self.convert_stream_chunk(line.encode())
+
+        client = httpx.AsyncClient(timeout=self.timeout_seconds)
+        response = None
+
+        async def abort_stream():
+            if response is not None:
+                await response.aclose()
+            await client.aclose()
+
+        try:
+            response = await client.send(
+                client.build_request(
+                    "POST",
+                    f"{self.base_url}/api/chat",
+                    json=payload,
+                    headers=self._get_headers(),
+                ),
+                stream=True,
+            )
+
+            if stream_control is not None:
+                stream_control.register_cancel_callback(abort_stream, native_supported=False)
+
+            if response.status_code != 200:
+                error_text = await response.aread()
+                raise GatewayError(f"Ollama Cloud error: {error_text.decode()}", status_code=response.status_code)
+
+            async for line in response.aiter_lines():
+                if line:
+                    yield self.convert_stream_chunk(line.encode())
+        finally:
+            if response is not None:
+                await response.aclose()
+            await client.aclose()
 
     def convert_request(self, openai_request: ChatCompletionRequest) -> Dict[str, Any]:
         ensure_supported_request(openai_request, self.capabilities, self.id)

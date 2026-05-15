@@ -1,10 +1,11 @@
 import time
-from typing import List, AsyncIterator, Dict, Any
+from typing import List, AsyncIterator, Dict, Any, Optional
 import httpx
 
 from .base import BaseProvider, ProviderModel, ProviderHealth
 from ..schemas import ChatCompletionRequest, ChatCompletionResponse
 from ..errors import GatewayError
+from ..streaming.control import ProviderStreamControl
 from .openai_compatible import (
     ProviderCapabilities,
     build_openai_chat_payload,
@@ -123,22 +124,45 @@ class OpenRouterProvider(BaseProvider):
                 raise self.normalize_error(ValueError(f"Status {resp.status_code}: {resp.text}"))
             return self.convert_response(resp.json(), request.model)
             
-    async def stream_chat_completion(self, request: ChatCompletionRequest) -> AsyncIterator[bytes]:
+    async def stream_chat_completion(
+        self,
+        request: ChatCompletionRequest,
+        stream_control: Optional[ProviderStreamControl] = None,
+    ) -> AsyncIterator[bytes]:
         request = request.model_copy(update={"stream": True})
-        async with httpx.AsyncClient() as client:
-            async with client.stream(
-                "POST", 
-                f"{self.base_url}/chat/completions",
-                headers=self.headers,
-                json=self.convert_request(request),
-                timeout=self.timeout_seconds
-            ) as response:
-                if response.status_code != 200:
-                    await response.aread()
-                    raise self.normalize_error(ValueError(f"Stream error {response.status_code}: {response.text}"))
-                    
-                async for chunk in response.aiter_bytes():
-                    yield self.convert_stream_chunk(chunk)
+        client = httpx.AsyncClient()
+        response = None
+
+        async def abort_stream():
+            if response is not None:
+                await response.aclose()
+            await client.aclose()
+
+        try:
+            response = await client.send(
+                client.build_request(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    headers=self.headers,
+                    json=self.convert_request(request),
+                ),
+                stream=True,
+                timeout=self.timeout_seconds,
+            )
+
+            if stream_control is not None:
+                stream_control.register_cancel_callback(abort_stream, native_supported=True)
+
+            if response.status_code != 200:
+                error_body = await response.aread()
+                raise self.normalize_error(ValueError(f"Stream error {response.status_code}: {error_body.decode(errors='ignore')}"))
+
+            async for chunk in response.aiter_bytes():
+                yield self.convert_stream_chunk(chunk)
+        finally:
+            if response is not None:
+                await response.aclose()
+            await client.aclose()
                     
     def normalize_error(self, error: Any) -> GatewayError:
         error_msg = str(error)

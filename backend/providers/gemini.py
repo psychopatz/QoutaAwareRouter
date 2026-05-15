@@ -11,6 +11,7 @@ from .openai_compatible import (
 	ensure_supported_request,
 	extract_reasoning_mode,
 	infer_capabilities_from_model_metadata,
+	request_uses_audio_output,
 )
 from ..errors import ErrorType, GatewayError
 from ..schemas import ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse
@@ -54,9 +55,41 @@ class GeminiProvider(BaseProvider):
 			supports_parallel_tool_calls=True,
 			supports_vision_input=True,
 			supports_audio_input=True,
-			supports_audio_output=False,
+			supports_audio_output=True,
 			supports_reasoning=True,
 			supports_response_format=True,
+		)
+
+	def _normalized_model_id(self, model_id: str) -> str:
+		return (model_id or "").removeprefix("models/").lower()
+
+	def _is_tts_model(self, model_id: str) -> bool:
+		normalized = self._normalized_model_id(model_id)
+		return "tts" in normalized
+
+	def _input_modalities_for_model(self, model_id: str) -> List[str]:
+		if self._is_tts_model(model_id):
+			return ["text"]
+
+		modalities = ["text"]
+		if self._normalized_model_id(model_id).startswith("gemini-"):
+			modalities.extend(["image", "audio"])
+		return modalities
+
+	def _output_modalities_for_model(self, model_id: str) -> List[str]:
+		if self._is_tts_model(model_id):
+			return ["audio"]
+
+		modalities = ["text"]
+		if "image" in self._normalized_model_id(model_id):
+			modalities.append("image")
+		return modalities
+
+	def _capabilities_for_model_hint(self, model_id: str) -> ProviderCapabilities:
+		return infer_capabilities_from_model_metadata(
+			supported_parameters=self._supported_parameters({"thinking": not self._is_tts_model(model_id)}),
+			input_modalities=self._input_modalities_for_model(model_id),
+			output_modalities=self._output_modalities_for_model(model_id),
 		)
 
 	def _ensure_api_key(self) -> None:
@@ -67,18 +100,6 @@ class GeminiProvider(BaseProvider):
 				provider_id=self.id,
 				status_code=401,
 			)
-
-	def _model_input_modalities(self, model_id: str) -> List[str]:
-		modalities = ["text"]
-		if model_id.startswith("gemini-"):
-			modalities.extend(["image", "audio"])
-		return modalities
-
-	def _model_output_modalities(self, model_id: str) -> List[str]:
-		modalities = ["text"]
-		if "image" in model_id:
-			modalities.append("image")
-		return modalities
 
 	def _supported_parameters(self, model_data: Dict[str, Any]) -> List[str]:
 		parameters = [
@@ -124,7 +145,7 @@ class GeminiProvider(BaseProvider):
 
 	def _should_use_native_api(self, request: ChatCompletionRequest) -> bool:
 		google_options = self._google_options(request)
-		return bool(google_options)
+		return bool(google_options) or request_uses_audio_output(request) or self._is_tts_model(request.model)
 
 	def _native_model_name(self, model: str) -> str:
 		if model.startswith("models/"):
@@ -336,6 +357,8 @@ class GeminiProvider(BaseProvider):
 
 		if request.modalities:
 			config.setdefault("responseModalities", [modality.upper() for modality in request.modalities])
+		elif self._is_tts_model(request.model):
+			config.setdefault("responseModalities", ["AUDIO"])
 
 		if request.response_format:
 			format_type = request.response_format.get("type")
@@ -360,6 +383,44 @@ class GeminiProvider(BaseProvider):
 		if google_thinking:
 			config.setdefault("thinkingConfig", {})
 			config["thinkingConfig"].update(google_thinking)
+
+		speech_config = dict(google_options.get("speech_config") or {})
+		request_audio = request.audio or {}
+		voice_name = request_audio.get("voice")
+		if voice_name:
+			speech_config.setdefault(
+				"voiceConfig",
+				{"prebuiltVoiceConfig": {"voiceName": voice_name}},
+			)
+
+		language_code = request_audio.get("language")
+		if language_code:
+			speech_config.setdefault("languageCode", language_code)
+
+		speakers = request_audio.get("speakers")
+		if isinstance(speakers, list) and speakers:
+			speaker_voice_configs = []
+			for speaker in speakers:
+				if not isinstance(speaker, dict):
+					continue
+				speaker_name = speaker.get("speaker")
+				speaker_voice = speaker.get("voice")
+				if not speaker_name or not speaker_voice:
+					continue
+				speaker_voice_configs.append(
+					{
+						"speaker": speaker_name,
+						"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": speaker_voice}},
+					}
+				)
+			if speaker_voice_configs:
+				speech_config["multiSpeakerVoiceConfig"] = {
+					"speakerVoiceConfigs": speaker_voice_configs,
+				}
+
+		if speech_config:
+			config.setdefault("speechConfig", {})
+			config["speechConfig"].update(speech_config)
 
 		return config or None
 
@@ -407,7 +468,7 @@ class GeminiProvider(BaseProvider):
 
 		return payload
 
-	def _extract_native_message(self, provider_response: Dict[str, Any]) -> Tuple[str, Optional[List[Dict[str, Any]]], Optional[str], Optional[Dict[str, Any]]]:
+	def _extract_native_message(self, provider_response: Dict[str, Any], requested_model: Optional[str] = None) -> Tuple[str, Optional[List[Dict[str, Any]]], Optional[str], Optional[Dict[str, Any]]]:
 		candidate = (provider_response.get("candidates") or [{}])[0]
 		content = candidate.get("content") or {}
 		parts = content.get("parts") or []
@@ -440,10 +501,16 @@ class GeminiProvider(BaseProvider):
 
 			inline_data = part.get("inlineData") or {}
 			mime_type = inline_data.get("mimeType", "")
-			if mime_type.startswith("audio/") and inline_data.get("data"):
+			model_hint = requested_model or provider_response.get("modelVersion") or ""
+			if inline_data.get("data") and (
+				mime_type.startswith("audio/")
+				or (not mime_type and self._is_tts_model(model_hint))
+			):
+				audio_format = mime_type.split("/", 1)[-1] if mime_type.startswith("audio/") else "pcm16"
 				audio = {
 					"data": inline_data["data"],
-					"format": mime_type.split("/", 1)[-1],
+					"format": audio_format,
+					"sample_rate_hz": 24000,
 				}
 
 		message_text = "".join(text_parts) if text_parts else None
@@ -476,7 +543,7 @@ class GeminiProvider(BaseProvider):
 		}
 
 	def _native_to_chat_response(self, provider_response: Dict[str, Any], model: str) -> ChatCompletionResponse:
-		message_text, tool_calls, reasoning_text, audio = self._extract_native_message(provider_response)
+		message_text, tool_calls, reasoning_text, audio = self._extract_native_message(provider_response, requested_model=model)
 		message: Dict[str, Any] = {"role": "assistant", "content": message_text}
 		if tool_calls:
 			message["tool_calls"] = tool_calls
@@ -510,7 +577,7 @@ class GeminiProvider(BaseProvider):
 		model: str,
 		state: Dict[str, Any],
 	) -> List[bytes]:
-		message_text, tool_calls, reasoning_text, audio = self._extract_native_message(provider_chunk)
+		message_text, tool_calls, reasoning_text, audio = self._extract_native_message(provider_chunk, requested_model=model)
 		response_id = provider_chunk.get("responseId") or state.get("id") or f"chatcmpl-{int(time.time() * 1000)}"
 		state["id"] = response_id
 		created = state.setdefault("created", int(time.time()))
@@ -644,8 +711,8 @@ class GeminiProvider(BaseProvider):
 						continue
 
 					model_id = model_data.get("baseModelId") or model_data.get("name", "").split("/", 1)[-1]
-					input_modalities = self._model_input_modalities(model_id)
-					output_modalities = self._model_output_modalities(model_id)
+					input_modalities = self._input_modalities_for_model(model_id)
+					output_modalities = self._output_modalities_for_model(model_id)
 					supported_parameters = self._supported_parameters(model_data)
 
 					models.append(
@@ -687,7 +754,7 @@ class GeminiProvider(BaseProvider):
 
 	def convert_request(self, request: ChatCompletionRequest) -> Dict[str, Any]:
 		self._ensure_api_key()
-		ensure_supported_request(request, self.capabilities, self.id)
+		ensure_supported_request(request, self._capabilities_for_model_hint(request.model), f"{self.id}/{request.model}")
 		if self._should_use_native_api(request):
 			return self._native_payload(request)
 		return build_openai_chat_payload(request)

@@ -8,6 +8,10 @@ interface Model {
   description?: string;
   is_free?: boolean;
   pricing?: Record<string, string> | null;
+  output_modalities?: string[];
+  capabilities?: {
+    supports_audio_output?: boolean;
+  } | null;
 }
 
 interface ProviderInfo {
@@ -16,19 +20,89 @@ interface ProviderInfo {
   actual_model?: string;
 }
 
+interface AudioPayload {
+  data?: string;
+  format?: string;
+  transcript?: string;
+  sample_rate_hz?: number;
+}
+
+interface ChatMessage {
+  role: string;
+  content?: string | null;
+  audio?: AudioPayload | null;
+  reasoning?: string | null;
+  refusal?: string | null;
+}
+
+interface GeminiSpeakerConfig {
+  speaker: string;
+  voice: string;
+}
+
+type GeminiSafetySettings = Record<string, string>;
+
+const GEMINI_VOICES = [
+  'Kore',
+  'Puck',
+  'Zephyr',
+  'Charon',
+  'Aoede',
+  'Autonoe',
+  'Enceladus',
+  'Iapetus',
+  'Schedar',
+  'Sulafat',
+];
+
+const GEMINI_SAFETY_CATEGORIES = [
+  { key: 'HARM_CATEGORY_HARASSMENT', label: 'Harassment' },
+  { key: 'HARM_CATEGORY_HATE_SPEECH', label: 'Hate speech' },
+  { key: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', label: 'Sexually explicit' },
+  { key: 'HARM_CATEGORY_DANGEROUS_CONTENT', label: 'Dangerous content' },
+];
+
+const GEMINI_SAFETY_THRESHOLDS = [
+  { value: '', label: 'Default safety' },
+  { value: 'BLOCK_LOW_AND_ABOVE', label: 'Block low and above' },
+  { value: 'BLOCK_MEDIUM_AND_ABOVE', label: 'Block medium and above' },
+  { value: 'BLOCK_ONLY_HIGH', label: 'Block only high' },
+  { value: 'BLOCK_NONE', label: 'Block none' },
+  { value: 'OFF', label: 'Off' },
+];
+
+const createInitialGeminiSafetySettings = (): GeminiSafetySettings => (
+  GEMINI_SAFETY_CATEGORIES.reduce<GeminiSafetySettings>((settings, category) => {
+    settings[category.key] = '';
+    return settings;
+  }, {})
+);
+
 const ChatInterface: React.FC = () => {
   const [models, setModels] = useState<Model[]>([]);
   const [services, setServices] = useState<string[]>([]);
   const [selectedService, setSelectedService] = useState(localStorage.getItem('qar_selected_service') || '');
   const [selectedModel, setSelectedModel] = useState(localStorage.getItem('qar_selected_model') || '');
   const [copied, setCopied] = useState(false);
-  const [messages, setMessages] = useState<{ role: string; content: string }[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [lastProvider, setLastProvider] = useState<ProviderInfo | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
   const [isModelPickerOpen, setIsModelPickerOpen] = useState(false);
+  const [geminiCachedContent, setGeminiCachedContent] = useState('');
+  const [geminiServiceTier, setGeminiServiceTier] = useState('standard');
+  const [geminiThinkingLevel, setGeminiThinkingLevel] = useState('');
+  const [geminiIncludeThoughts, setGeminiIncludeThoughts] = useState(false);
+  const [geminiAudioEnabled, setGeminiAudioEnabled] = useState(false);
+  const [geminiVoice, setGeminiVoice] = useState('Kore');
+  const [geminiSafetySettings, setGeminiSafetySettings] = useState<GeminiSafetySettings>(() => createInitialGeminiSafetySettings());
+  const [geminiMultiSpeakerEnabled, setGeminiMultiSpeakerEnabled] = useState(false);
+  const [geminiSpeakers, setGeminiSpeakers] = useState<GeminiSpeakerConfig[]>([
+    { speaker: 'Speaker1', voice: 'Kore' },
+    { speaker: 'Speaker2', voice: 'Puck' },
+  ]);
 
   const trimServicePrefix = (service: string, modelId: string) => {
     const prefix = `${service}/`;
@@ -38,6 +112,9 @@ const ChatInterface: React.FC = () => {
   const formatServiceLabel = (service: string) => service.replace(/_/g, ' ');
 
   const selectedModelInfo = models.find((model) => trimServicePrefix(selectedService, model.id) === selectedModel);
+  const geminiSupportsAudioOutput = selectedService === 'gemini' && Boolean(
+    selectedModelInfo?.capabilities?.supports_audio_output || selectedModelInfo?.output_modalities?.includes('audio')
+  );
   const freeModelCount = models.filter((model) => model.is_free).length;
   const filteredModels = models
     .filter((model) => {
@@ -138,24 +215,175 @@ const ChatInterface: React.FC = () => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages]);
 
+  useEffect(() => {
+    if (!geminiSupportsAudioOutput && geminiAudioEnabled) {
+      setGeminiAudioEnabled(false);
+    }
+  }, [geminiSupportsAudioOutput, geminiAudioEnabled]);
+
+  useEffect(() => {
+    if (!geminiAudioEnabled && geminiMultiSpeakerEnabled) {
+      setGeminiMultiSpeakerEnabled(false);
+    }
+  }, [geminiAudioEnabled, geminiMultiSpeakerEnabled]);
+
+  const updateGeminiSpeaker = (index: number, field: keyof GeminiSpeakerConfig, value: string) => {
+    setGeminiSpeakers((current) => current.map((speaker, speakerIndex) => (
+      speakerIndex === index ? { ...speaker, [field]: value } : speaker
+    )));
+  };
+
+  const decodeBase64 = (value: string) => {
+    const binary = atob(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+  };
+
+  const encodeBase64 = (bytes: Uint8Array) => {
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let index = 0; index < bytes.length; index += chunkSize) {
+      const chunk = bytes.subarray(index, index + chunkSize);
+      binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+  };
+
+  const wrapPcm16AsWav = (base64Data: string, sampleRate: number) => {
+    const pcmBytes = decodeBase64(base64Data);
+    const header = new ArrayBuffer(44);
+    const view = new DataView(header);
+    const writeAscii = (offset: number, text: string) => {
+      for (let index = 0; index < text.length; index += 1) {
+        view.setUint8(offset + index, text.charCodeAt(index));
+      }
+    };
+
+    const channelCount = 1;
+    const bitsPerSample = 16;
+    const byteRate = sampleRate * channelCount * (bitsPerSample / 8);
+    const blockAlign = channelCount * (bitsPerSample / 8);
+
+    writeAscii(0, 'RIFF');
+    view.setUint32(4, 36 + pcmBytes.length, true);
+    writeAscii(8, 'WAVE');
+    writeAscii(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, channelCount, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+    writeAscii(36, 'data');
+    view.setUint32(40, pcmBytes.length, true);
+
+    const wavBytes = new Uint8Array(44 + pcmBytes.length);
+    wavBytes.set(new Uint8Array(header), 0);
+    wavBytes.set(pcmBytes, 44);
+
+    return encodeBase64(wavBytes);
+  };
+
+  const buildAudioPreviewSrc = (audio?: AudioPayload | null) => {
+    if (!audio?.data) return null;
+    const format = (audio.format || '').toLowerCase();
+    const mimeTypeByFormat: Record<string, string> = {
+      wav: 'audio/wav',
+      wave: 'audio/wav',
+      mp3: 'audio/mpeg',
+      mpeg: 'audio/mpeg',
+      ogg: 'audio/ogg',
+      webm: 'audio/webm',
+    };
+
+    if (format === 'pcm16' || format === 'pcm') {
+      const wavBase64 = wrapPcm16AsWav(audio.data, audio.sample_rate_hz || 24000);
+      return `data:audio/wav;base64,${wavBase64}`;
+    }
+
+    const mimeType = mimeTypeByFormat[format];
+    if (!mimeType) return null;
+    return `data:${mimeType};base64,${audio.data}`;
+  };
+
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input || !selectedModel) return;
 
-    const newMessages = [...messages, { role: 'user', content: input }];
+    const newMessages: ChatMessage[] = [...messages, { role: 'user', content: input }];
     setMessages(newMessages);
     setInput('');
     setLoading(true);
 
     try {
+      const requestBody: Record<string, unknown> = {
+        model: `${selectedService}/${selectedModel}`,
+        messages: newMessages.map((message) => ({ role: message.role, content: message.content })),
+        stream: false,
+      };
+
+      if (selectedService === 'gemini') {
+        const googleOptions: Record<string, unknown> = {};
+
+        if (geminiCachedContent.trim()) {
+          googleOptions.cached_content = geminiCachedContent.trim();
+        }
+
+        if (geminiServiceTier !== 'standard') {
+          googleOptions.service_tier = geminiServiceTier;
+        }
+
+        if (geminiIncludeThoughts || geminiThinkingLevel) {
+          const thinkingConfig: Record<string, unknown> = {};
+          if (geminiIncludeThoughts) {
+            thinkingConfig.includeThoughts = true;
+          }
+          if (geminiThinkingLevel) {
+            thinkingConfig.thinkingLevel = geminiThinkingLevel.toUpperCase();
+          }
+          googleOptions.thinking_config = thinkingConfig;
+        }
+
+        const safetySettings = GEMINI_SAFETY_CATEGORIES
+          .map((category) => ({
+            category: category.key,
+            threshold: geminiSafetySettings[category.key],
+          }))
+          .filter((setting) => setting.threshold);
+
+        if (safetySettings.length > 0) {
+          googleOptions.safety_settings = safetySettings;
+        }
+
+        if (geminiAudioEnabled && geminiSupportsAudioOutput) {
+          requestBody.modalities = ['audio'];
+          const audioPayload: Record<string, unknown> = {
+            format: 'wav',
+            language: 'en-US',
+          };
+
+          if (geminiMultiSpeakerEnabled) {
+            audioPayload.speakers = geminiSpeakers.filter((speaker) => speaker.speaker.trim() && speaker.voice.trim());
+          } else {
+            audioPayload.voice = geminiVoice;
+          }
+
+          requestBody.audio = audioPayload;
+        }
+
+        if (Object.keys(googleOptions).length > 0) {
+          requestBody.extra_body = { google: googleOptions };
+        }
+      }
+
       const response = await fetch('/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: `${selectedService}/${selectedModel}`,
-          messages: newMessages,
-          stream: false
-        })
+        body: JSON.stringify(requestBody)
       });
       const data = await response.json();
       setLastProvider(data.provider ?? null);
@@ -253,19 +481,190 @@ const ChatInterface: React.FC = () => {
         </div>
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-4">
-        {messages.map((m, i) => (
-          <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-[80%] p-3 rounded-2xl flex gap-3 ${
-              m.role === 'user' ? 'bg-brand-600' : 'bg-white/10 border border-white/5'
-            }`}>
-              <div className="shrink-0">
-                {m.role === 'user' ? <User className="w-5 h-5" /> : <Bot className="w-5 h-5 text-brand-400" />}
+      {selectedService === 'gemini' && (
+        <div className="border-b border-white/10 bg-white/[0.03] px-4 py-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
+            <input
+              className="input-field py-2 text-sm bg-slate-800"
+              value={geminiCachedContent}
+              onChange={(e) => setGeminiCachedContent(e.target.value)}
+              placeholder="Gemini cachedContent (optional)"
+            />
+            <select
+              className="input-field py-2 text-sm bg-slate-800"
+              value={geminiServiceTier}
+              onChange={(e) => setGeminiServiceTier(e.target.value)}
+            >
+              <option value="standard">Gemini tier: standard</option>
+              <option value="flex">Gemini tier: flex</option>
+              <option value="priority">Gemini tier: priority</option>
+            </select>
+            <select
+              className="input-field py-2 text-sm bg-slate-800"
+              value={geminiThinkingLevel}
+              onChange={(e) => setGeminiThinkingLevel(e.target.value)}
+            >
+              <option value="">Thinking level: default</option>
+              <option value="minimal">Thinking: minimal</option>
+              <option value="low">Thinking: low</option>
+              <option value="medium">Thinking: medium</option>
+              <option value="high">Thinking: high</option>
+            </select>
+            <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-slate-900/70 px-3 py-2 text-sm text-slate-300">
+              <input
+                type="checkbox"
+                checked={geminiIncludeThoughts}
+                onChange={(e) => setGeminiIncludeThoughts(e.target.checked)}
+              />
+              Include Gemini thoughts
+            </label>
+            {geminiSupportsAudioOutput ? (
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-slate-900/70 px-3 py-2 text-sm text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={geminiAudioEnabled}
+                    onChange={(e) => setGeminiAudioEnabled(e.target.checked)}
+                  />
+                  Audio output
+                </label>
+                <select
+                  className="input-field py-2 text-sm bg-slate-800"
+                  value={geminiVoice}
+                  onChange={(e) => setGeminiVoice(e.target.value)}
+                  disabled={!geminiAudioEnabled}
+                >
+                  {GEMINI_VOICES.map((voice) => (
+                    <option key={voice} value={voice}>{voice}</option>
+                  ))}
+                </select>
               </div>
-              <p className="text-sm whitespace-pre-wrap">{m.content}</p>
+            ) : (
+              <div className="rounded-xl border border-white/10 bg-slate-900/70 px-3 py-2 text-xs text-slate-500">
+                Selected Gemini model does not advertise audio output.
+              </div>
+            )}
+          </div>
+          <div className="mt-3 rounded-2xl border border-white/10 bg-slate-950/60 p-3">
+            <div className="flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
+              <div>
+                <p className="text-sm font-medium text-slate-100">Advanced Gemini</p>
+                <p className="text-xs text-slate-500">Safety thresholds and multi-speaker TTS stay scoped to Gemini requests only.</p>
+              </div>
+              {geminiSupportsAudioOutput ? (
+                <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-slate-900/70 px-3 py-2 text-sm text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={geminiMultiSpeakerEnabled}
+                    onChange={(e) => setGeminiMultiSpeakerEnabled(e.target.checked)}
+                    disabled={!geminiAudioEnabled}
+                  />
+                  Multi-speaker TTS
+                </label>
+              ) : null}
+            </div>
+
+            <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+              <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Safety Settings</p>
+                <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                  {GEMINI_SAFETY_CATEGORIES.map((category) => (
+                    <label key={category.key} className="space-y-1 text-xs text-slate-400">
+                      <span>{category.label}</span>
+                      <select
+                        className="input-field py-2 text-sm bg-slate-800"
+                        value={geminiSafetySettings[category.key]}
+                        onChange={(e) => setGeminiSafetySettings((current) => ({
+                          ...current,
+                          [category.key]: e.target.value,
+                        }))}
+                      >
+                        {GEMINI_SAFETY_THRESHOLDS.map((threshold) => (
+                          <option key={threshold.value || 'default'} value={threshold.value}>{threshold.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">TTS Speakers</p>
+                {geminiSupportsAudioOutput ? (
+                  geminiMultiSpeakerEnabled ? (
+                    <div className="space-y-3">
+                      {geminiSpeakers.map((speaker, index) => (
+                        <div key={`${speaker.voice}-${index}`} className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                          <input
+                            className="input-field py-2 text-sm bg-slate-800"
+                            value={speaker.speaker}
+                            onChange={(e) => updateGeminiSpeaker(index, 'speaker', e.target.value)}
+                            placeholder={`Speaker ${index + 1} name`}
+                          />
+                          <select
+                            className="input-field py-2 text-sm bg-slate-800"
+                            value={speaker.voice}
+                            onChange={(e) => updateGeminiSpeaker(index, 'voice', e.target.value)}
+                          >
+                            {GEMINI_VOICES.map((voice) => (
+                              <option key={voice} value={voice}>{voice}</option>
+                            ))}
+                          </select>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-500">Single-speaker mode is active. Enable multi-speaker TTS to send named speakers and voices.</p>
+                  )
+                ) : (
+                  <p className="text-sm text-slate-500">This model is not advertising Gemini audio output, so TTS speaker controls stay disabled.</p>
+                )}
+              </div>
             </div>
           </div>
-        ))}
+        </div>
+      )}
+
+      <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-4">
+        {messages.map((m, i) => {
+          const audioPreviewSrc = buildAudioPreviewSrc(m.audio);
+
+          return (
+            <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div className={`max-w-[80%] p-3 rounded-2xl flex gap-3 ${
+                m.role === 'user' ? 'bg-brand-600' : 'bg-white/10 border border-white/5'
+              }`}>
+                <div className="shrink-0">
+                  {m.role === 'user' ? <User className="w-5 h-5" /> : <Bot className="w-5 h-5 text-brand-400" />}
+                </div>
+                <div className="space-y-2">
+                  <p className="text-sm whitespace-pre-wrap">{m.content || m.refusal || (m.audio ? 'Audio response returned.' : '')}</p>
+                  {m.reasoning ? (
+                    <p className="text-xs whitespace-pre-wrap rounded-lg bg-black/20 px-3 py-2 text-slate-400">
+                      Reasoning: {m.reasoning}
+                    </p>
+                  ) : null}
+                  {m.audio?.transcript ? (
+                    <p className="text-xs whitespace-pre-wrap rounded-lg bg-black/20 px-3 py-2 text-slate-300">
+                      Transcript: {m.audio.transcript}
+                    </p>
+                  ) : null}
+                  {m.audio ? (
+                    <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-xs text-slate-400">
+                      <p>Audio format: {m.audio.format || 'unknown'}</p>
+                      {m.audio.sample_rate_hz ? <p className="mt-1">Sample rate: {m.audio.sample_rate_hz} Hz</p> : null}
+                      {audioPreviewSrc ? (
+                        <audio className="mt-2 w-full" controls src={audioPreviewSrc} />
+                      ) : (
+                        <p className="mt-1">Browser preview unavailable for this audio payload.</p>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          );
+        })}
         {loading && (
           <div className="flex justify-start">
             <div className="bg-white/10 p-3 rounded-2xl animate-pulse flex gap-2">

@@ -61,6 +61,45 @@ async def test_gemini_list_models_uses_native_models_api(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_gemini_tts_model_listing_exposes_audio_output_capabilities(monkeypatch):
+	original_async_client = httpx.AsyncClient
+
+	def handler(request: httpx.Request) -> httpx.Response:
+		assert request.method == "GET"
+		return httpx.Response(
+			200,
+			json={
+				"models": [
+					{
+						"name": "models/gemini-3.1-flash-tts-preview",
+						"baseModelId": "gemini-3.1-flash-tts-preview",
+						"displayName": "Gemini 3.1 Flash TTS Preview",
+						"supportedGenerationMethods": ["generateContent"],
+					}
+				]
+			},
+		)
+
+	transport = httpx.MockTransport(handler)
+
+	def build_client(*args, **kwargs):
+		return original_async_client(transport=transport)
+
+	monkeypatch.setattr("backend.providers.gemini.httpx.AsyncClient", build_client)
+
+	provider = GeminiProvider(id="gemini-primary", type="gemini", api_key="gm-test-key")
+	models = await provider.list_models()
+
+	assert len(models) == 1
+	assert models[0].id == "gemini-3.1-flash-tts-preview"
+	assert models[0].input_modalities == ["text"]
+	assert models[0].output_modalities == ["audio"]
+	assert models[0].capabilities is not None
+	assert models[0].capabilities.supports_audio_input is False
+	assert models[0].capabilities.supports_audio_output is True
+
+
+@pytest.mark.asyncio
 async def test_gemini_chat_completion_uses_openai_compat_endpoint(monkeypatch):
 	original_async_client = httpx.AsyncClient
 
@@ -270,3 +309,63 @@ async def test_gemini_stream_with_google_options_uses_native_stream_endpoint(mon
 	assert '"finish_reason":"stop"' in body
 	assert '"usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}'.replace(" ", "") in body.replace(" ", "")
 	assert body.endswith("data: [DONE]\n\n")
+
+
+@pytest.mark.asyncio
+async def test_gemini_tts_audio_output_request_uses_native_speech_config(monkeypatch):
+	original_async_client = httpx.AsyncClient
+
+	def handler(request: httpx.Request) -> httpx.Response:
+		assert request.method == "POST"
+		assert request.url.path == "/v1beta/models/gemini-3.1-flash-tts-preview:generateContent"
+		payload = request.read().decode("utf-8")
+		assert '"responseModalities":["AUDIO"]' in payload
+		assert '"speechConfig":{"voiceConfig":{"prebuiltVoiceConfig":{"voiceName":"Kore"}},"languageCode":"en-US"}' in payload
+		return httpx.Response(
+			200,
+			json={
+				"responseId": "gemini-tts-1",
+				"modelVersion": "gemini-3.1-flash-tts-preview",
+				"candidates": [
+					{
+						"content": {
+							"role": "model",
+							"parts": [
+								{
+									"inlineData": {
+										"data": "UklGRiQAAABXQVZF",
+										"mimeType": "audio/wav",
+									}
+								}
+							],
+						},
+						"finishReason": "STOP",
+					}
+				],
+				"usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 1, "totalTokenCount": 6},
+			},
+		)
+
+	transport = httpx.MockTransport(handler)
+
+	def build_client(*args, **kwargs):
+		return original_async_client(transport=transport)
+
+	monkeypatch.setattr("backend.providers.gemini.httpx.AsyncClient", build_client)
+
+	provider = GeminiProvider(id="gemini-primary", type="gemini", api_key="gm-test-key")
+	response = await provider.chat_completion(
+		ChatCompletionRequest(
+			model="gemini-3.1-flash-tts-preview",
+			messages=[{"role": "user", "content": "Say hello cheerfully."}],
+			modalities=["audio"],
+			audio={"voice": "Kore", "language": "en-US", "format": "wav"},
+		)
+	)
+
+	assert response.provider.actual_model == "gemini-3.1-flash-tts-preview"
+	assert response.choices[0].finish_reason == "stop"
+	assert response.choices[0].message.content is None
+	assert response.choices[0].message.audio is not None
+	assert response.choices[0].message.audio["format"] == "wav"
+	assert response.choices[0].message.audio["data"] == "UklGRiQAAABXQVZF"

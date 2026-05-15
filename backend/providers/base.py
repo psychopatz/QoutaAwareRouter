@@ -58,6 +58,31 @@ class BaseProvider(ABC):
         """Send a streaming chat completion request."""
         pass
 
+    async def test_key(self, api_key: str) -> bool:
+        """Test if an API key is valid for this provider."""
+        import traceback
+        import logging
+        logger = logging.getLogger("qarouter.providers")
+        
+        # Save old config key
+        old_key = self.config.get("api_key")
+        
+        # Temporarily apply new key
+        self.config["api_key"] = api_key
+        try:
+            # list_models is usually a quick authenticated GET request
+            await self.list_models()
+            return True
+        except Exception as e:
+            logger.warning(f"Key test failed for provider {self.id}: {e}")
+            return False
+        finally:
+            # Restore config
+            if old_key is not None:
+                self.config["api_key"] = old_key
+            else:
+                self.config.pop("api_key", None)
+
     @abstractmethod
     def convert_request(self, openai_request: ChatCompletionRequest) -> Dict[str, Any]:
         """Convert OpenAI request to provider-specific format."""

@@ -23,7 +23,7 @@ class Router:
             # Final fallback log for unhandled errors
             latency = (time.time() - start_time) * 1000
             traffic_manager.add_log(TrafficLog(
-                id=log_id,
+                id=str(uuid.uuid4()),
                 timestamp=time.time(),
                 method="POST",
                 path="/v1/chat/completions",
@@ -36,32 +36,49 @@ class Router:
             raise
 
     async def _route_internal(self, request: ChatCompletionRequest, log_id: str, start_time: float) -> ChatCompletionResponse:
-        candidates = self.alias_manager.resolve(request.model)
+        # Handle prefixed model names (e.g., 'ollama/llama3')
+        requested_model = request.model
+        required_service = None
+        if "/" in requested_model:
+            required_service, requested_model = requested_model.split("/", 1)
+            logger.info(f"Prefix detected: service={required_service}, model={requested_model}")
+
+        candidates = self.alias_manager.resolve(requested_model)
         
         if not candidates:
             # Fallback: check if any provider directly supports this model
-            # For the Chat Tester and discovered models, we allow direct routing
             from ..providers.registry import registry
             for p_id, provider in registry.get_all_instances().items():
                 if provider.enabled:
-                    candidates.append(Candidate(provider=p_id, model=request.model, priority=1))
+                    # If service prefix is present, only consider matching providers
+                    if required_service and provider.type != required_service:
+                        continue
+                    candidates.append(Candidate(provider=p_id, model=requested_model, priority=1))
             
             if not candidates:
-                raise GatewayError(f"Model alias '{request.model}' not found and no providers available", type=ErrorType.INVALID_MODEL, status_code=400)
+                msg = f"Model '{requested_model}' not found"
+                if required_service: msg += f" for service '{required_service}'"
+                raise GatewayError(msg, type=ErrorType.INVALID_MODEL, status_code=400)
 
         # Filter and sort candidates based on strategy
         # Phase 2: priority_failover (implied by candidate order)
         
         errors = []
         for candidate in candidates:
+            # Ensure the service restriction is checked again internally just in case candidates came from ALIAS
             provider = registry.get_instance(candidate.provider)
             if not provider or not provider.enabled:
                 logger.debug(f"Provider {candidate.provider} is disabled or not found, skipping")
+                continue
+                
+            if required_service and provider.type != required_service:
+                logger.debug(f"Provider {candidate.provider} does not match required service {required_service}, skipping")
                 continue
 
             # TODO: Check health, cooldowns, concurrency limits (Phase 2/6)
             
             # Prepare request with actual provider model
+            # We use candidate.model instead of requested_model just in case alias specifies a different name
             provider_request = request.model_copy(update={"model": candidate.model})
             
             # Dynamic Key Logic (Phase 4 integration)
@@ -83,7 +100,7 @@ class Router:
                     latency = (time.time() - start_time) * 1000
                     
                     traffic_manager.add_log(TrafficLog(
-                        id=log_id,
+                        id=str(uuid.uuid4()),
                         timestamp=time.time(),
                         method="POST",
                         path="/v1/chat/completions",
@@ -98,7 +115,7 @@ class Router:
                 except GatewayError as e:
                     latency = (time.time() - start_time) * 1000
                     traffic_manager.add_log(TrafficLog(
-                        id=log_id,
+                        id=str(uuid.uuid4()),
                         timestamp=time.time(),
                         method="POST",
                         path="/v1/chat/completions",

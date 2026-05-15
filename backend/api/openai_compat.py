@@ -21,7 +21,7 @@ async def list_models():
             models = await provider.list_models()
             for m in models:
                 all_models.append({
-                    "id": m.id,
+                    "id": f"{provider.type}/{m.id}",
                     "object": "model",
                     "created": int(time.time()),
                     "owned_by": provider.type

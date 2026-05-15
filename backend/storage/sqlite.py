@@ -2,8 +2,10 @@ import sqlite3
 import os
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
+from cryptography.fernet import Fernet
 
 DB_PATH = "qarouter.db"
+KEY_FILE = "encryption_key.key"
 
 class ApiKey(BaseModel):
     id: Optional[int] = None
@@ -16,7 +18,27 @@ class ApiKey(BaseModel):
 class Storage:
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
+        self.cipher = self._init_cipher()
         self._init_db()
+
+    def _init_cipher(self) -> Fernet:
+        if os.path.exists(KEY_FILE):
+            with open(KEY_FILE, "rb") as f:
+                key = f.read()
+        else:
+            key = Fernet.generate_key()
+            with open(KEY_FILE, "wb") as f:
+                f.write(key)
+        return Fernet(key)
+
+    def _encrypt(self, text: str) -> str:
+        return self.cipher.encrypt(text.encode()).decode()
+
+    def _decrypt(self, text: str) -> str:
+        try:
+            return self.cipher.decrypt(text.encode()).decode()
+        except:
+            return text
 
     def _init_db(self):
         with sqlite3.connect(self.db_path) as conn:
@@ -34,11 +56,12 @@ class Storage:
             conn.commit()
 
     def add_key(self, service: str, key: str) -> int:
+        encrypted_key = self._encrypt(key)
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO api_keys (service, key) VALUES (?, ?)",
-                (service, key)
+                (service, encrypted_key)
             )
             return cursor.lastrowid
 
@@ -47,7 +70,13 @@ class Storage:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM api_keys WHERE service = ?", (service,))
-            return [ApiKey(**dict(row)) for row in cursor.fetchall()]
+            rows = cursor.fetchall()
+            keys = []
+            for row in rows:
+                d = dict(row)
+                d['key'] = self._decrypt(d['key'])
+                keys.append(ApiKey(**d))
+            return keys
 
     def update_key_status(self, key_id: int, status: str, cooldown_until: Optional[str] = None):
         with sqlite3.connect(self.db_path) as conn:
@@ -67,6 +96,12 @@ class Storage:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM api_keys")
-            return [ApiKey(**dict(row)) for row in cursor.fetchall()]
+            rows = cursor.fetchall()
+            keys = []
+            for row in rows:
+                d = dict(row)
+                d['key'] = self._decrypt(d['key'])
+                keys.append(ApiKey(**d))
+            return keys
 
 storage = Storage()

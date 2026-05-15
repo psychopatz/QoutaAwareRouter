@@ -20,6 +20,13 @@ providers:
     max_concurrent_requests: 1
     timeout_seconds: 180
 
+  - id: openrouter-primary
+    type: openrouter
+    enabled: true
+    priority: 15
+    max_concurrent_requests: 10
+    timeout_seconds: 120
+
 model_aliases:
   default:
     candidates:

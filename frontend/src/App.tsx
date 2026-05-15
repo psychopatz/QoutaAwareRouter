@@ -57,6 +57,15 @@ const App: React.FC = () => {
     }
   };
 
+  const testKey = async (id: number) => {
+    try {
+      await fetch(`/admin/keys/${id}/test`, { method: 'POST' });
+      fetchKeys();
+    } catch (error) {
+      console.error('Failed to test key', error);
+    }
+  };
+
   const copyToClipboard = () => {
     navigator.clipboard.writeText(baseUrl);
     setCopiedBase(true);
@@ -189,6 +198,13 @@ const App: React.FC = () => {
                           className="absolute bottom-4 right-4 text-slate-500 hover:text-rose-400 p-2 rounded-lg hover:bg-rose-400/10 transition-all opacity-0 group-hover:opacity-100"
                         >
                           <Trash2 className="w-4 h-4" />
+                        </button>
+                        <button 
+                          onClick={() => testKey(key.id!)}
+                          className="absolute bottom-4 right-14 text-slate-500 hover:text-emerald-400 p-2 rounded-lg hover:bg-emerald-400/10 transition-all opacity-0 group-hover:opacity-100"
+                          title="Test Key"
+                        >
+                          <Activity className="w-4 h-4" />
                         </button>
                       </div>
                     ))}

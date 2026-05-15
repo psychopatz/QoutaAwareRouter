@@ -1,6 +1,11 @@
 from typing import Dict, Iterable, Optional, Sequence
 
 SERVICE_DEFINITIONS: Dict[str, Dict[str, Sequence[str] | str]] = {
+	"gemini": {
+		"aliases": ("gemini", "google", "google_gemini"),
+		"provider_types": ("gemini",),
+		"label": "Google Gemini",
+	},
     "ollama": {
         "aliases": ("ollama", "ollama_cloud"),
         "provider_types": ("ollama_cloud",),

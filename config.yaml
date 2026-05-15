@@ -1,4 +1,11 @@
 providers:
+  - id: gemini-primary
+    type: gemini
+    enabled: true
+    priority: 12
+    max_concurrent_requests: 10
+    timeout_seconds: 120
+
   - id: ollama-local-main
     type: ollama_local
     enabled: true

@@ -1,5 +1,6 @@
 from typing import Dict, Type, Optional
 from .base import BaseProvider
+from .gemini import GeminiProvider
 from .ollama_local import OllamaLocalProvider
 from .ollama_cloud import OllamaCloudProvider
 from .openrouter import OpenRouterProvider
@@ -7,6 +8,7 @@ from .openrouter import OpenRouterProvider
 class ProviderRegistry:
     _instance = None
     _providers: Dict[str, Type[BaseProvider]] = {
+        "gemini": GeminiProvider,
         "ollama_local": OllamaLocalProvider,
         "ollama_cloud": OllamaCloudProvider,
         "openrouter": OpenRouterProvider,

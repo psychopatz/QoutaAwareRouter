@@ -224,6 +224,7 @@ const App: React.FC = () => {
                   value={newKey.service}
                   onChange={(e) => setNewKey({ ...newKey, service: e.target.value })}
                 >
+                  <option value="gemini">Google Gemini</option>
                   <option value="ollama">Ollama Cloud</option>
                   <option value="openrouter">OpenRouter</option>
                   <option value="openai">OpenAI Compatible</option>

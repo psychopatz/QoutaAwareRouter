@@ -76,7 +76,7 @@ class SuccessProvider(BaseProvider):
         yield b""
 
     async def test_key(self, api_key: str) -> bool:
-        return api_key == "ollama-valid-key"
+        return api_key.endswith("-valid-key")
 
     def convert_request(self, openai_request: ChatCompletionRequest):
         return {}
@@ -228,3 +228,23 @@ def test_admin_test_key_resolves_generic_ollama_service(registry_backup, isolate
     assert response.status_code == 200
     assert response.json()["status"] == "active"
     assert response.json()["message"] == "Key is active and valid!"
+
+
+def test_admin_test_key_resolves_gemini_service(registry_backup, isolated_storage):
+    key_id = isolated_storage.add_key("gemini", "gemini-valid-key")
+    registry._active_instances = {
+        "gemini-primary": SuccessProvider(
+            id="gemini-primary",
+            type="gemini",
+            supported_models=["gemini-2.5-flash"],
+        ),
+    }
+
+    app = FastAPI()
+    app.include_router(admin.router, prefix="/admin")
+    client = TestClient(app)
+
+    response = client.post(f"/admin/keys/{key_id}/test")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "active"

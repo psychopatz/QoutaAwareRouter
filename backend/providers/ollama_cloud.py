@@ -82,10 +82,31 @@ class OllamaCloudProvider(BaseProvider):
                         yield self.convert_stream_chunk(line.encode())
 
     def convert_request(self, openai_request: ChatCompletionRequest) -> Dict[str, Any]:
-        # Resolve model: the router usually passes the actual provider model here
+        messages = []
+        for m in openai_request.messages:
+            msg = {"role": m.role}
+            if isinstance(m.content, str):
+                msg["content"] = m.content
+            elif isinstance(m.content, list):
+                text_parts = []
+                images = []
+                for part in m.content:
+                    if part.get("type") == "text":
+                        text_parts.append(part.get("text", ""))
+                    elif part.get("type") == "image_url":
+                        url = part.get("image_url", {}).get("url", "")
+                        if url.startswith("data:image"):
+                            # Extract base64 part from 'data:image/jpeg;base64,...'
+                            b64 = url.split(",", 1)[-1]
+                            images.append(b64)
+                msg["content"] = "\n".join(text_parts)
+                if images:
+                    msg["images"] = images
+            messages.append(msg)
+
         return {
             "model": openai_request.model,
-            "messages": [m.model_dump() for m in openai_request.messages],
+            "messages": messages,
             "stream": False,  # Default to false, overridden in stream_chat_completion
             "options": {
                 "temperature": openai_request.temperature,

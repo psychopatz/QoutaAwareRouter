@@ -152,5 +152,105 @@ class Router:
         raise GatewayError(f"No healthy providers found for model '{request.model}'", type=ErrorType.ALL_PROVIDERS_UNAVAILABLE, status_code=503)
 
     async def route_stream(self, request: ChatCompletionRequest):
-        # Placeholder for streaming (Phase 3)
-        pass
+        from fastapi.responses import StreamingResponse
+        from ..providers.registry import registry
+        import json
+        
+        requested_model = request.model
+        required_service = None
+        if "/" in requested_model:
+            required_service, requested_model = requested_model.split("/", 1)
+
+        candidates = self.alias_manager.resolve(requested_model)
+        
+        if not candidates:
+            for p_id, provider in registry.get_all_instances().items():
+                if provider.enabled:
+                    if required_service and provider.type != required_service:
+                        continue
+                    candidates.append(Candidate(provider=p_id, model=requested_model, priority=1))
+            
+            if not candidates:
+                msg = f"Model '{requested_model}' not found"
+                if required_service: msg += f" for service '{required_service}'"
+                raise GatewayError(msg, type=ErrorType.INVALID_MODEL, status_code=400)
+                
+        async def stream_generator():
+            nonlocal request
+            start_time = time.time()
+            errors = []
+            
+            for candidate in candidates:
+                provider = registry.get_instance(candidate.provider)
+                if not provider or not provider.enabled or not provider.supports_streaming:
+                    continue
+                if required_service and provider.type != required_service:
+                    continue
+                    
+                provider_request = request.model_copy(update={"model": candidate.model})
+                
+                from ..storage.sqlite import storage
+                dynamic_keys = storage.get_keys_by_service(provider.type)
+                active_keys = [k for k in dynamic_keys if k.status == "active"]
+                keys_to_try = active_keys if active_keys else [None]
+                
+                for d_key in keys_to_try:
+                    if d_key:
+                        provider.config["api_key"] = d_key.key
+                        
+                    chunks_yielded = False
+                    log_id_iter = str(uuid.uuid4())
+                    try:
+                        logger.info(f"Stream routing to provider={provider.id}, model={candidate.model}")
+                        
+                        async for chunk in provider.stream_chat_completion(provider_request):
+                            chunks_yielded = True
+                            if chunk:
+                                yield chunk
+                                
+                        traffic_manager.add_log(TrafficLog(
+                            id=log_id_iter,
+                            timestamp=time.time(),
+                            method="POST",
+                            path="/v1/chat/completions/stream",
+                            model=request.model,
+                            provider_id=provider.id,
+                            status_code=200,
+                            latency_ms=(time.time() - start_time) * 1000
+                        ))
+                        return
+                        
+                    except Exception as general_e:
+                        # Wrap non-gateway errors
+                        e = general_e if isinstance(general_e, GatewayError) else GatewayError(str(general_e), provider_id=provider.id)
+                        
+                        if chunks_yielded:
+                            logger.error(f"Stream broken mid-way: {e}")
+                            err_payload = json.dumps({"error": {"message": f"Stream interrupted: {e.message}"}})
+                            yield f"data: {err_payload}\n\n".encode()
+                            return
+                            
+                        traffic_manager.add_log(TrafficLog(
+                            id=log_id_iter,
+                            timestamp=time.time(),
+                            method="POST",
+                            path="/v1/chat/completions/stream",
+                            model=request.model,
+                            provider_id=provider.id,
+                            status_code=e.status_code,
+                            latency_ms=(time.time() - start_time) * 1000,
+                            error=e.message
+                        ))
+                        
+                        if e.type == ErrorType.RATE_LIMITED and d_key:
+                            storage.update_key_status(d_key.id, "rate_limited")
+                            continue
+                            
+                        errors.append(e)
+                        break
+
+            last_err = errors[-1].message if errors else "No healthy streaming providers found"
+            err_payload = json.dumps({"error": {"message": f"All providers failed. Last error: {last_err}"}})
+            yield f"data: {err_payload}\n\n".encode()
+            
+        return StreamingResponse(stream_generator(), media_type="text/event-stream")

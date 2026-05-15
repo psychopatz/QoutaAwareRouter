@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: Union[str, List[Dict[str, Any]]]
     name: Optional[str] = None
 
 class ChatCompletionRequest(BaseModel):

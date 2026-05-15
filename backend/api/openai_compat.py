@@ -46,8 +46,7 @@ async def chat_completions(request: ChatCompletionRequest):
     
     try:
         if request.stream:
-            # Phase 3: Streaming
-            raise GatewayError("Streaming not yet implemented in Phase 1", status_code=501)
+            return await _router_instance.route_stream(request)
         
         response = await _router_instance.route(request)
         return response

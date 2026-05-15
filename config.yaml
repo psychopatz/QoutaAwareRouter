@@ -1,0 +1,37 @@
+providers:
+  - id: ollama-local-main
+    type: ollama_local
+    enabled: true
+    base_url: "http://127.0.0.1:11434"
+    priority: 10
+    models:
+      - "llama3.1"
+    max_concurrent_requests: 1
+    timeout_seconds: 180
+
+  - id: ollama-cloud-primary
+    type: ollama_cloud
+    enabled: true
+    base_url: "https://ollama.com"
+    api_key: "4a387b75973b44fab6b007bf60c2f432.sMRgP9mYHKR2Ou08ImsU2d0p"
+    priority: 20
+    models:
+      - "gpt-oss:120b"
+    max_concurrent_requests: 1
+    timeout_seconds: 180
+
+model_aliases:
+  default:
+    candidates:
+      - provider: ollama-local-main
+        model: llama3.1
+      - provider: ollama-cloud-primary
+        model: gpt-oss:120b
+
+routing:
+  strategy: priority_failover
+  max_retries_total: 2
+
+server:
+  host: "127.0.0.1"
+  port: 7317

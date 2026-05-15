@@ -9,26 +9,64 @@ import time
 
 router = APIRouter()
 
+import asyncio
+
+_models_cache = {
+    "timestamp": 0,
+    "data": [],
+    "by_service": {}
+}
+CACHE_TTL = 300  # 5 minutes
+
 @router.get("/models")
-async def list_models():
+@router.get("/models/{service_type}")
+async def list_models(service_type: str = None):
+    global _models_cache
+    now = time.time()
+    
+    if now - _models_cache["timestamp"] < CACHE_TTL and _models_cache["data"]:
+        if service_type:
+            return {"object": "list", "data": _models_cache["by_service"].get(service_type, [])}
+        return {"object": "list", "data": _models_cache["data"]}
+
     all_models = []
+    by_service = {}
     providers = registry.get_all_instances()
     
-    for p_id, provider in providers.items():
-        if not provider.enabled:
-            continue
+    async def fetch_provider_models(p_id, provider):
         try:
-            models = await provider.list_models()
-            for m in models:
-                all_models.append({
-                    "id": f"{provider.type}/{m.id}",
-                    "object": "model",
-                    "created": int(time.time()),
-                    "owned_by": provider.type
-                })
+            return p_id, provider.type, await provider.list_models()
         except Exception as e:
             logger.warning(f"Failed to list models for provider {p_id}: {e}")
+            return p_id, provider.type, []
             
+    tasks = [
+        fetch_provider_models(p_id, provider)
+        for p_id, provider in providers.items()
+        if provider.enabled
+    ]
+    
+    results = await asyncio.gather(*tasks) if tasks else []
+    
+    for p_id, p_type, models in results:
+        for m in models:
+            model_obj = {
+                "id": f"{p_type}/{m.id}",
+                "object": "model",
+                "created": int(now),
+                "owned_by": p_type
+            }
+            all_models.append(model_obj)
+            if p_type not in by_service:
+                by_service[p_type] = []
+            by_service[p_type].append(model_obj)
+            
+    _models_cache["timestamp"] = now
+    _models_cache["data"] = all_models
+    _models_cache["by_service"] = by_service
+            
+    if service_type:
+        return {"object": "list", "data": by_service.get(service_type, [])}
     return {"object": "list", "data": all_models}
 
 # Dependency injection for the router would be better, 

@@ -21,13 +21,11 @@ const ChatInterface: React.FC = () => {
     fetch('/v1/models')
       .then(res => res.json())
       .then(data => {
-        const fetchedModels = data.data;
-        setModels(fetchedModels);
-        
-        if (fetchedModels.length > 0) {
-          const uniqueServices = Array.from(new Set(fetchedModels.map((m: Model) => m.owned_by))) as string[];
+        const allFetched = data.data;
+        if (allFetched.length > 0) {
+          const uniqueServices = Array.from(new Set(allFetched.map((m: Model) => m.owned_by))) as string[];
           setServices(uniqueServices);
-          
+
           let currentService = localStorage.getItem('qar_selected_service');
           if (!currentService || !uniqueServices.includes(currentService)) {
              currentService = uniqueServices[0];
@@ -36,20 +34,26 @@ const ChatInterface: React.FC = () => {
           } else {
              setSelectedService(currentService);
           }
-          
-          const serviceModels = fetchedModels.filter((m: Model) => m.owned_by === currentService);
-          const currentModel = localStorage.getItem('qar_selected_model');
-          const fullId = `${currentService}/${currentModel}`;
-          
-          const isValidModel = serviceModels.some((m: Model) => m.id === fullId);
-          if (!isValidModel || !currentModel) {
-             const firstModelId = serviceModels[0]?.id;
-             const firstModelName = firstModelId ? firstModelId.split('/')[1] : '';
-             setSelectedModel(firstModelName);
-             localStorage.setItem('qar_selected_model', firstModelName);
-          } else {
-             setSelectedModel(currentModel);
-          }
+
+          fetch(`/v1/models/${currentService}`)
+            .then(r => r.json())
+            .then(serviceData => {
+               const serviceModels = serviceData.data;
+               setModels(serviceModels);
+               
+               const currentModel = localStorage.getItem('qar_selected_model');
+               const fullId = `${currentService}/${currentModel}`;
+               const isValidModel = serviceModels.some((m: Model) => m.id === fullId);
+               
+               if (!isValidModel || !currentModel) {
+                  const firstModelId = serviceModels[0]?.id;
+                  const firstModelName = firstModelId ? firstModelId.split('/')[1] : '';
+                  setSelectedModel(firstModelName);
+                  localStorage.setItem('qar_selected_model', firstModelName);
+               } else {
+                  setSelectedModel(currentModel);
+               }
+            });
         }
       });
   }, []);
@@ -57,15 +61,21 @@ const ChatInterface: React.FC = () => {
   const handleServiceChange = (service: string) => {
     setSelectedService(service);
     localStorage.setItem('qar_selected_service', service);
-    const serviceModels = models.filter((m) => m.owned_by === service);
-    if (serviceModels.length > 0) {
-      const firstModelName = serviceModels[0].id.split('/')[1];
-      setSelectedModel(firstModelName);
-      localStorage.setItem('qar_selected_model', firstModelName);
-    } else {
-      setSelectedModel('');
-      localStorage.setItem('qar_selected_model', '');
-    }
+    
+    fetch(`/v1/models/${service}`)
+      .then(res => res.json())
+      .then(data => {
+        const serviceModels = data.data;
+        setModels(serviceModels);
+        if (serviceModels.length > 0) {
+          const firstModelName = serviceModels[0].id.split('/')[1];
+          setSelectedModel(firstModelName);
+          localStorage.setItem('qar_selected_model', firstModelName);
+        } else {
+          setSelectedModel('');
+          localStorage.setItem('qar_selected_model', '');
+        }
+      });
   };
 
   const handleModelChange = (model: string) => {
@@ -144,7 +154,7 @@ const ChatInterface: React.FC = () => {
             placeholder="Type to search model..."
           />
           <datalist id="model-options">
-            {models.filter(m => m.owned_by === selectedService).map(m => {
+            {models.map(m => {
               const modelName = m.id.split('/')[1];
               return <option key={modelName} value={modelName} />;
             })}

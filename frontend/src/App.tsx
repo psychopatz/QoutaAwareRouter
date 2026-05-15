@@ -59,10 +59,13 @@ const App: React.FC = () => {
 
   const testKey = async (id: number) => {
     try {
-      await fetch(`/admin/keys/${id}/test`, { method: 'POST' });
+      const response = await fetch(`/admin/keys/${id}/test`, { method: 'POST' });
+      const data = await response.json();
+      alert(`Test Result:\n${data.message}`);
       fetchKeys();
     } catch (error) {
       console.error('Failed to test key', error);
+      alert('Error: Failed to connect to server');
     }
   };
 

@@ -1,3 +1,5 @@
+from decimal import Decimal, InvalidOperation
+
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from ..schemas import ChatCompletionRequest, ChatCompletionResponse
@@ -18,6 +20,81 @@ _models_cache = {
 }
 CACHE_TTL = 300  # 5 minutes
 
+
+def invalidate_models_cache():
+    global _models_cache
+    _models_cache = {
+        "timestamp": 0,
+        "data": [],
+        "by_service": {},
+    }
+
+
+def _set_provider_api_key(provider, api_key):
+    if api_key:
+        provider.config["api_key"] = api_key
+    else:
+        provider.config.pop("api_key", None)
+
+    descriptor = getattr(type(provider), "api_key", None)
+    if hasattr(provider, "api_key") and not isinstance(descriptor, property):
+        provider.api_key = api_key
+
+
+def _extract_pricing(raw: dict):
+    pricing = raw.get("pricing")
+    return pricing if isinstance(pricing, dict) else None
+
+
+def _is_zero_cost(value) -> bool:
+    if value in (None, "", "-1"):
+        return False
+    try:
+        return Decimal(str(value)) == 0
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
+def _is_free_model(model) -> bool:
+    raw = model.raw if isinstance(model.raw, dict) else {}
+    pricing = _extract_pricing(raw) or {}
+    zero_cost_dimensions = [key for key, value in pricing.items() if _is_zero_cost(value)]
+    if zero_cost_dimensions and all(_is_zero_cost(value) for value in pricing.values() if value not in (None, "", "-1")):
+        return True
+
+    model_id = (model.id or "").lower()
+    model_name = (model.name or "").lower()
+    return model_id.endswith(":free") or "(free)" in model_name
+
+
+async def _list_provider_models(provider):
+    from ..storage.sqlite import storage
+
+    original_api_key = provider.config.get("api_key")
+    active_keys = [key.key for key in storage.get_keys_by_service(provider.type) if key.status == "active"]
+    candidate_api_keys = []
+    if original_api_key:
+        candidate_api_keys.append(original_api_key)
+    candidate_api_keys.extend(key for key in active_keys if key and key != original_api_key)
+    if not candidate_api_keys:
+        candidate_api_keys = [None]
+
+    last_error = None
+    try:
+        for index, candidate_api_key in enumerate(candidate_api_keys):
+            _set_provider_api_key(provider, candidate_api_key)
+            try:
+                models = await provider.list_models()
+                if models or index == len(candidate_api_keys) - 1:
+                    return models
+            except Exception as error:
+                last_error = error
+        if last_error:
+            raise last_error
+        return []
+    finally:
+        _set_provider_api_key(provider, original_api_key)
+
 @router.get("/models")
 @router.get("/models/{service_type}")
 async def list_models(service_type: str = None):
@@ -35,7 +112,7 @@ async def list_models(service_type: str = None):
     
     async def fetch_provider_models(p_id, provider):
         try:
-            return p_id, provider.type, await provider.list_models()
+            return p_id, provider.type, await _list_provider_models(provider)
         except Exception as e:
             logger.warning(f"Failed to list models for provider {p_id}: {e}")
             return p_id, provider.type, []
@@ -55,12 +132,16 @@ async def list_models(service_type: str = None):
                 "object": "model",
                 "created": int(now),
                 "owned_by": p_type,
+                "name": m.name,
+                "description": (m.raw or {}).get("description"),
                 "context_length": m.context_length,
                 "max_completion_tokens": m.max_completion_tokens,
                 "input_modalities": m.input_modalities,
                 "output_modalities": m.output_modalities,
                 "supported_parameters": m.supported_parameters,
                 "capabilities": m.capabilities.model_dump() if m.capabilities else None,
+                "pricing": _extract_pricing(m.raw or {}),
+                "is_free": _is_free_model(m),
             }
             all_models.append(model_obj)
             if p_type not in by_service:

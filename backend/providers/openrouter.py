@@ -4,7 +4,7 @@ import httpx
 
 from .base import BaseProvider, ProviderModel, ProviderHealth
 from ..schemas import ChatCompletionRequest, ChatCompletionResponse
-from ..errors import GatewayError
+from ..errors import GatewayError, ErrorType
 from ..streaming.control import ProviderStreamControl
 from .openai_compatible import (
     ProviderCapabilities,
@@ -169,7 +169,11 @@ class OpenRouterProvider(BaseProvider):
         status_code = getattr(error, 'status_code', 500)
         
         if "Status 429" in error_msg or self._is_quota_error(status_code, error_msg):
-            from ..errors import GatewayRateLimitError
-            return GatewayRateLimitError(error_msg, "openrouter")
+            return GatewayError(
+                error_msg,
+                type=ErrorType.RATE_LIMITED,
+                provider_id=self.id,
+                status_code=status_code,
+            )
             
-        return GatewayError(error_msg, status_code=status_code)
+        return GatewayError(error_msg, provider_id=self.id, status_code=status_code)

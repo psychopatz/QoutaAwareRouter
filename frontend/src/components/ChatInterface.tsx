@@ -1,9 +1,19 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, User, Bot, RefreshCw, ChevronDown, Copy, Check } from 'lucide-react';
+import { Send, User, Bot, RefreshCw, Copy, Check } from 'lucide-react';
 
 interface Model {
   id: string;
   owned_by: string;
+  name?: string;
+  description?: string;
+  is_free?: boolean;
+  pricing?: Record<string, string> | null;
+}
+
+interface ProviderInfo {
+  id?: string;
+  type?: string;
+  actual_model?: string;
 }
 
 const ChatInterface: React.FC = () => {
@@ -15,72 +25,105 @@ const ChatInterface: React.FC = () => {
   const [messages, setMessages] = useState<{ role: string; content: string }[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [lastProvider, setLastProvider] = useState<ProviderInfo | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const modelPickerRef = useRef<HTMLDivElement>(null);
+  const [isModelPickerOpen, setIsModelPickerOpen] = useState(false);
+
+  const trimServicePrefix = (service: string, modelId: string) => {
+    const prefix = `${service}/`;
+    return modelId.startsWith(prefix) ? modelId.slice(prefix.length) : modelId;
+  };
+
+  const formatServiceLabel = (service: string) => service.replace(/_/g, ' ');
+
+  const selectedModelInfo = models.find((model) => trimServicePrefix(selectedService, model.id) === selectedModel);
+  const freeModelCount = models.filter((model) => model.is_free).length;
+  const filteredModels = models
+    .filter((model) => {
+      const modelName = trimServicePrefix(selectedService, model.id).toLowerCase();
+      const displayName = (model.name || '').toLowerCase();
+      const query = selectedModel.toLowerCase();
+      return !query || modelName.includes(query) || displayName.includes(query);
+    })
+    .slice(0, 40);
+
+  const loadModelsForService = async (service: string, preferredModel?: string) => {
+    const response = await fetch(`/v1/models/${service}`);
+    const data = await response.json();
+    const serviceModels = data.data as Model[];
+    setModels(serviceModels);
+
+    const preferred = preferredModel || localStorage.getItem('qar_selected_model') || '';
+    const preferredFullId = `${service}/${preferred}`;
+    const hasPreferred = preferred && serviceModels.some((model) => model.id === preferredFullId);
+
+    if (hasPreferred) {
+      setSelectedModel(preferred);
+      localStorage.setItem('qar_selected_model', preferred);
+      return;
+    }
+
+    const firstModelId = serviceModels[0]?.id;
+    const firstModelName = firstModelId ? trimServicePrefix(service, firstModelId) : '';
+    setSelectedModel(firstModelName);
+    localStorage.setItem('qar_selected_model', firstModelName);
+  };
+
+  const handleModelPick = (modelId: string) => {
+    const modelName = trimServicePrefix(selectedService, modelId);
+    setSelectedModel(modelName);
+    localStorage.setItem('qar_selected_model', modelName);
+    setIsModelPickerOpen(false);
+  };
 
   useEffect(() => {
-    fetch('/v1/models')
-      .then(res => res.json())
-      .then(data => {
-        const allFetched = data.data;
-        if (allFetched.length > 0) {
-          const uniqueServices = Array.from(new Set(allFetched.map((m: Model) => m.owned_by))) as string[];
-          setServices(uniqueServices);
+    const loadInitialModels = async () => {
+      const response = await fetch('/v1/models');
+      const data = await response.json();
+      const allFetched = data.data as Model[];
+      if (!allFetched.length) {
+        return;
+      }
 
-          let currentService = localStorage.getItem('qar_selected_service');
-          if (!currentService || !uniqueServices.includes(currentService)) {
-             currentService = uniqueServices[0];
-             setSelectedService(currentService);
-             localStorage.setItem('qar_selected_service', currentService);
-          } else {
-             setSelectedService(currentService);
-          }
+      const uniqueServices = Array.from(new Set(allFetched.map((model) => model.owned_by))) as string[];
+      setServices(uniqueServices);
 
-          fetch(`/v1/models/${currentService}`)
-            .then(r => r.json())
-            .then(serviceData => {
-               const serviceModels = serviceData.data;
-               setModels(serviceModels);
-               
-               const currentModel = localStorage.getItem('qar_selected_model');
-               const fullId = `${currentService}/${currentModel}`;
-               const isValidModel = serviceModels.some((m: Model) => m.id === fullId);
-               
-               if (!isValidModel || !currentModel) {
-                  const firstModelId = serviceModels[0]?.id;
-                  const firstModelName = firstModelId ? firstModelId.split('/')[1] : '';
-                  setSelectedModel(firstModelName);
-                  localStorage.setItem('qar_selected_model', firstModelName);
-               } else {
-                  setSelectedModel(currentModel);
-               }
-            });
-        }
-      });
+      let currentService = localStorage.getItem('qar_selected_service') || '';
+      if (!currentService || !uniqueServices.includes(currentService)) {
+        currentService = uniqueServices[0];
+        localStorage.setItem('qar_selected_service', currentService);
+      }
+
+      setSelectedService(currentService);
+      await loadModelsForService(currentService);
+    };
+
+    void loadInitialModels();
+  }, []);
+
+  useEffect(() => {
+    const handleOutsideClick = (event: MouseEvent) => {
+      if (modelPickerRef.current && !modelPickerRef.current.contains(event.target as Node)) {
+        setIsModelPickerOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, []);
 
   const handleServiceChange = (service: string) => {
     setSelectedService(service);
     localStorage.setItem('qar_selected_service', service);
-    
-    fetch(`/v1/models/${service}`)
-      .then(res => res.json())
-      .then(data => {
-        const serviceModels = data.data;
-        setModels(serviceModels);
-        if (serviceModels.length > 0) {
-          const firstModelName = serviceModels[0].id.split('/')[1];
-          setSelectedModel(firstModelName);
-          localStorage.setItem('qar_selected_model', firstModelName);
-        } else {
-          setSelectedModel('');
-          localStorage.setItem('qar_selected_model', '');
-        }
-      });
+
+    void loadModelsForService(service, '');
   };
 
   const handleModelChange = (model: string) => {
     setSelectedModel(model);
     localStorage.setItem('qar_selected_model', model);
+    setIsModelPickerOpen(true);
   };
 
   const handleCopyModel = () => {
@@ -115,6 +158,7 @@ const ChatInterface: React.FC = () => {
         })
       });
       const data = await response.json();
+      setLastProvider(data.provider ?? null);
       if (data.choices && data.choices.length > 0) {
         setMessages([...newMessages, data.choices[0].message]);
       } else if (data.error) {
@@ -132,9 +176,18 @@ const ChatInterface: React.FC = () => {
   return (
     <div className="flex flex-col h-[600px] glass-card overflow-hidden">
       <div className="p-4 border-b border-white/10 flex justify-between items-center bg-white/5">
-        <div className="flex items-center gap-2">
-          <Bot className="w-5 h-5 text-brand-400" />
-          <span className="font-medium">Chat Tester</span>
+        <div>
+          <div className="flex items-center gap-2">
+            <Bot className="w-5 h-5 text-brand-400" />
+            <span className="font-medium">Chat Tester</span>
+          </div>
+          <p className="text-xs text-slate-500 mt-1">
+            {lastProvider?.id ? `Last routed via ${lastProvider.id}${lastProvider.actual_model ? ` · ${lastProvider.actual_model}` : ''}` : 'No routed provider yet'}
+          </p>
+          <p className="text-xs text-slate-500 mt-1">
+            {models.length ? `${models.length} models loaded${freeModelCount ? ` · ${freeModelCount} free` : ''}` : 'No models loaded'}
+            {selectedModelInfo?.is_free ? ' · selected model is free' : ''}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <select 
@@ -143,22 +196,53 @@ const ChatInterface: React.FC = () => {
             onChange={(e) => handleServiceChange(e.target.value)}
           >
             {services.map(s => (
-              <option key={s} value={s}>{s}</option>
+              <option key={s} value={s}>{formatServiceLabel(s)}</option>
             ))}
           </select>
-          <input
-            list="model-options"
-            className="input-field py-1 text-sm bg-slate-800 w-64 pr-8"
-            value={selectedModel}
-            onChange={(e) => handleModelChange(e.target.value)}
-            placeholder="Type to search model..."
-          />
-          <datalist id="model-options">
-            {models.map(m => {
-              const modelName = m.id.split('/')[1];
-              return <option key={modelName} value={modelName} />;
-            })}
-          </datalist>
+          <div ref={modelPickerRef} className="relative w-80">
+            <input
+              className="input-field py-1 text-sm bg-slate-800 w-full"
+              value={selectedModel}
+              onFocus={() => setIsModelPickerOpen(true)}
+              onChange={(e) => handleModelChange(e.target.value)}
+              placeholder="Type to search model..."
+            />
+            {isModelPickerOpen && (
+              <div className="absolute top-[calc(100%+0.5rem)] z-20 w-full overflow-hidden rounded-xl border border-white/10 bg-slate-950/95 shadow-2xl backdrop-blur-md">
+                <div className="max-h-80 overflow-y-auto">
+                  {filteredModels.length ? filteredModels.map((model) => {
+                    const modelName = trimServicePrefix(selectedService, model.id);
+                    const isSelected = modelName === selectedModel;
+                    return (
+                      <button
+                        key={model.id}
+                        type="button"
+                        className={`w-full border-b border-white/5 px-3 py-2 text-left transition-all last:border-b-0 ${isSelected ? 'bg-brand-500/15' : 'hover:bg-white/5'}`}
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          handleModelPick(model.id);
+                        }}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="truncate text-sm text-slate-100">{modelName}</span>
+                          {model.is_free ? (
+                            <span className="rounded-full border border-emerald-400/30 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-emerald-300">
+                              Free
+                            </span>
+                          ) : null}
+                        </div>
+                        {model.description ? (
+                          <p className="mt-1 line-clamp-2 text-xs text-slate-500">{model.description}</p>
+                        ) : null}
+                      </button>
+                    );
+                  }) : (
+                    <div className="px-3 py-4 text-sm text-slate-500">No models match this search.</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
           <button 
             onClick={handleCopyModel}
             className="p-2 hover:bg-white/10 rounded-lg transition-all text-slate-400 hover:text-white border border-white/10"

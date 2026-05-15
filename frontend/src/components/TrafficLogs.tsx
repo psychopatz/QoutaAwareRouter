@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Activity, Clock, Server, Terminal, AlertTriangle } from 'lucide-react';
+import { Activity, Server, AlertTriangle } from 'lucide-react';
 
 interface TrafficLog {
   id: string;
@@ -8,8 +8,10 @@ interface TrafficLog {
   path: string;
   model: string;
   provider_id?: string;
-  status_code: int;
-  latency_ms: float;
+  key_id?: number;
+  key_suffix?: string;
+  status_code: number;
+  latency_ms: number;
   error?: string;
 }
 
@@ -45,6 +47,7 @@ const TrafficLogs: React.FC = () => {
               <th className="px-4 py-3 font-medium">Time</th>
               <th className="px-4 py-3 font-medium">Model</th>
               <th className="px-4 py-3 font-medium">Provider</th>
+              <th className="px-4 py-3 font-medium">API Key</th>
               <th className="px-4 py-3 font-medium">Status</th>
               <th className="px-4 py-3 font-medium text-right">Latency</th>
             </tr>
@@ -64,6 +67,9 @@ const TrafficLogs: React.FC = () => {
                     </span>
                   ) : '-'}
                 </td>
+                <td className="px-4 py-3 font-mono text-xs text-slate-300">
+                  {log.key_id ? `#${log.key_id} ••••${log.key_suffix || '????'}` : '-'}
+                </td>
                 <td className="px-4 py-3">
                   <span className={`px-2 py-0.5 rounded-full text-xs flex items-center gap-1 w-fit ${
                     log.status_code < 300 ? 'bg-emerald-500/20 text-emerald-400' : 
@@ -80,7 +86,7 @@ const TrafficLogs: React.FC = () => {
             ))}
             {logs.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-4 py-20 text-center text-slate-500">
+                <td colSpan={6} className="px-4 py-20 text-center text-slate-500">
                   No traffic recorded yet.
                 </td>
               </tr>

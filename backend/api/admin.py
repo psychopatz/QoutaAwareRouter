@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException
 from ..storage.sqlite import storage, ApiKey
+from ..service_resolution import pick_provider_for_service
 from pydantic import BaseModel
+from .openai_compat import invalidate_models_cache
 
 router = APIRouter()
 
@@ -12,19 +14,26 @@ class KeyCreate(BaseModel):
 async def list_keys():
     return storage.get_all_keys()
 
+@router.get("/keys/summary")
+async def key_summary():
+    return storage.get_key_summary()
+
 @router.post("/keys")
 async def add_key(data: KeyCreate):
     key_id = storage.add_key(data.service, data.key)
+    invalidate_models_cache()
     return {"id": key_id, "status": "added"}
 
 @router.delete("/keys/{key_id}")
 async def delete_key(key_id: int):
     storage.delete_key(key_id)
+    invalidate_models_cache()
     return {"status": "deleted"}
 
 @router.post("/keys/{key_id}/status")
 async def update_status(key_id: int, status: str):
     storage.update_key_status(key_id, status)
+    invalidate_models_cache()
     return {"status": "updated"}
 
 @router.post("/keys/{key_id}/test")
@@ -35,12 +44,7 @@ async def test_key(key_id: int):
         raise HTTPException(status_code=404, detail="Key not found")
         
     from ..providers.registry import registry
-    # Find any provider matching the service type
-    target_provider = None
-    for p_id, provider in registry.get_all_instances().items():
-        if provider.type == key.service:
-            target_provider = provider
-            break
+    target_provider = pick_provider_for_service(registry.get_all_instances().values(), key.service)
             
     if not target_provider:
         raise HTTPException(status_code=400, detail=f"No provider instance found for service type: {key.service}")
@@ -48,7 +52,12 @@ async def test_key(key_id: int):
     is_valid = await target_provider.test_key(key.key)
     
     new_status = "active" if is_valid else "auth_failed"
-    storage.update_key_status(key_id, new_status)
+    storage.update_key_status(
+        key_id,
+        new_status,
+        last_status_message=None if is_valid else "Authentication failed or key is invalid/exhausted.",
+    )
+    invalidate_models_cache()
     
     return {
         "status": new_status,

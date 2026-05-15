@@ -9,6 +9,8 @@ class TrafficLog(BaseModel):
     path: str
     model: str
     provider_id: Optional[str] = None
+    key_id: Optional[int] = None
+    key_suffix: Optional[str] = None
     status_code: int
     latency_ms: float
     error: Optional[str] = None

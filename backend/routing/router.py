@@ -13,6 +13,49 @@ class Router:
         self.routing_config = routing_config
         self.max_retries = routing_config.get("max_retries_total", 2)
 
+    def _is_quota_exhausted_error(self, error: GatewayError) -> bool:
+        if error.type == ErrorType.QUOTA_LIMITED:
+            return True
+
+        message = (error.message or "").lower()
+        quota_markers = (
+            "quota",
+            "usage limit",
+            "weekly usage limit",
+            "monthly usage limit",
+            "credit balance",
+            "insufficient credits",
+            "out of credits",
+            "upgrade for higher limits",
+            "exhausted",
+        )
+        return any(marker in message for marker in quota_markers)
+
+    def _record_key_attempt(self, storage, dynamic_key, provider, model: str):
+        if dynamic_key is None:
+            return
+        storage.record_key_usage(dynamic_key.id, provider.id, model)
+
+    def _handle_dynamic_key_error(self, storage, dynamic_key, error: GatewayError) -> bool:
+        if dynamic_key is None:
+            return False
+
+        if self._is_quota_exhausted_error(error):
+            logger.warning(f"Key {dynamic_key.id} is quota exhausted, marking inactive in DB")
+            storage.record_key_exhausted(dynamic_key.id, error.message)
+            return True
+
+        if error.type == ErrorType.RATE_LIMITED:
+            logger.warning(f"Key {dynamic_key.id} is rate limited, marking in DB")
+            storage.update_key_status(dynamic_key.id, "rate_limited", last_status_message=error.message)
+            return True
+
+        if error.type == ErrorType.AUTH_FAILED:
+            logger.warning(f"Key {dynamic_key.id} failed authentication, marking inactive in DB")
+            storage.update_key_status(dynamic_key.id, "auth_failed", last_status_message=error.message)
+
+        return False
+
     async def route(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         start_time = time.time()
         log_id = str(uuid.uuid4())
@@ -127,6 +170,7 @@ class Router:
                 if d_key:
                     # Pass the key to the provider temporarily
                     provider.config["api_key"] = d_key.key
+                    self._record_key_attempt(storage, d_key, provider, candidate.model)
                 
                 try:
                     logger.info(f"Routing request to provider={provider.id}, model={candidate.model} using key_id={d_key.id if d_key else 'default'}")
@@ -140,6 +184,8 @@ class Router:
                         path="/v1/chat/completions",
                         model=request.model,
                         provider_id=provider.id,
+                        key_id=d_key.id if d_key else None,
+                        key_suffix=d_key.key[-4:] if d_key else None,
                         status_code=200,
                         latency_ms=latency
                     ))
@@ -155,14 +201,14 @@ class Router:
                         path="/v1/chat/completions",
                         model=request.model,
                         provider_id=provider.id,
+                        key_id=d_key.id if d_key else None,
+                        key_suffix=d_key.key[-4:] if d_key else None,
                         status_code=e.status_code,
                         latency_ms=latency,
                         error=e.message
                     ))
                     
-                    if e.type == ErrorType.RATE_LIMITED and d_key:
-                        logger.warning(f"Key {d_key.id} for {provider.type} is rate limited, marking in DB")
-                        storage.update_key_status(d_key.id, "rate_limited")
+                    if self._handle_dynamic_key_error(storage, d_key, e):
                         continue # Try next key
                     
                     logger.warning(f"Provider {provider.id} failed: {e.message}")
@@ -228,6 +274,7 @@ class Router:
                 for d_key in keys_to_try:
                     if d_key:
                         provider.config["api_key"] = d_key.key
+                        self._record_key_attempt(storage, d_key, provider, candidate.model)
                         
                     chunks_yielded = False
                     log_id_iter = str(uuid.uuid4())
@@ -255,6 +302,8 @@ class Router:
                             path="/v1/chat/completions/stream",
                             model=request.model,
                             provider_id=provider.id,
+                            key_id=d_key.id if d_key else None,
+                            key_suffix=d_key.key[-4:] if d_key else None,
                             status_code=200,
                             latency_ms=(time.time() - start_time) * 1000
                         ))
@@ -280,13 +329,14 @@ class Router:
                             path="/v1/chat/completions/stream",
                             model=request.model,
                             provider_id=provider.id,
+                            key_id=d_key.id if d_key else None,
+                            key_suffix=d_key.key[-4:] if d_key else None,
                             status_code=e.status_code,
                             latency_ms=(time.time() - start_time) * 1000,
                             error=e.message
                         ))
                         
-                        if e.type == ErrorType.RATE_LIMITED and d_key:
-                            storage.update_key_status(d_key.id, "rate_limited")
+                        if self._handle_dynamic_key_error(storage, d_key, e):
                             continue
                             
                         errors.append(e)

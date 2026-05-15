@@ -20,8 +20,11 @@ class OllamaCloudProvider(BaseProvider):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.base_url = self.config.get("base_url", "https://ollama.com").rstrip("/")
-        self.api_key = self.config.get("api_key") or self.config.get("api_key_env")
         self._models_cache = {"timestamp": 0.0, "models": []}
+
+    @property
+    def api_key(self) -> Optional[str]:
+        return self.config.get("api_key") or self.config.get("api_key_env")
 
     def default_capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(

@@ -87,6 +87,15 @@ def test_ollama_rejects_audio_output_requests():
     assert "audio output" in exc_info.value.message
 
 
+def test_ollama_headers_use_current_config_api_key():
+    provider = OllamaCloudProvider(id="ollama-test", type="ollama_cloud")
+    provider.config["api_key"] = "first-key"
+    assert provider._get_headers()["Authorization"] == "Bearer first-key"
+
+    provider.config["api_key"] = "second-key"
+    assert provider._get_headers()["Authorization"] == "Bearer second-key"
+
+
 def test_openrouter_convert_response_injects_provider_metadata():
     provider = OpenRouterProvider(id="openrouter-test", type="openrouter")
     response = provider.convert_response(

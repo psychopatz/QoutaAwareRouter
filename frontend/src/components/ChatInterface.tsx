@@ -105,6 +105,7 @@ const ChatInterface: React.FC = () => {
     { speaker: 'Speaker2', voice: 'Puck' },
   ]);
   const [showGeminiSettings, setShowGeminiSettings] = useState(false);
+  const [selectedImage, setSelectedImage] = useState<string | null>(null);
 
   const trimServicePrefix = (service: string, modelId: string) => {
     const prefix = `${service}/`;
@@ -190,6 +191,31 @@ const ChatInterface: React.FC = () => {
 
     document.addEventListener('mousedown', handleOutsideClick);
     return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, []);
+
+  useEffect(() => {
+    const handlePaste = (event: ClipboardEvent) => {
+      const items = event.clipboardData?.items;
+      if (items) {
+        for (const item of items) {
+          if (item.type.indexOf('image') !== -1) {
+            const file = item.getAsFile();
+            if (file) {
+              const reader = new FileReader();
+              reader.onloadend = () => {
+                setSelectedImage(reader.result as string);
+              };
+              reader.readAsDataURL(file);
+              event.preventDefault();
+              return;
+            }
+          }
+        }
+      }
+    };
+
+    document.addEventListener('paste', handlePaste);
+    return () => document.removeEventListener('paste', handlePaste);
   }, []);
 
   const handleServiceChange = (service: string) => {
@@ -312,19 +338,38 @@ const ChatInterface: React.FC = () => {
     return `data:${mimeType};base64,${audio.data}`;
   };
 
+  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setSelectedImage(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input || !selectedModel) return;
+    if (!input && !selectedImage) return;
+    if (!selectedModel) return;
 
-    const newMessages: ChatMessage[] = [...messages, { role: 'user', content: input }];
+    const newMessages: ChatMessage[] = [...messages, { role: 'user', content: input, image: selectedImage }];
     setMessages(newMessages);
     setInput('');
+    setSelectedImage(null);
     setLoading(true);
 
     try {
       const requestBody: Record<string, unknown> = {
         model: `${selectedService}/${selectedModel}`,
-        messages: newMessages.map((message) => ({ role: message.role, content: message.content })),
+        messages: newMessages.map((message) => {
+          const msg: Record<string, unknown> = { role: message.role, content: message.content };
+          if (message.image) {
+            msg.image = message.image;
+          }
+          return msg;
+        }),
         stream: false,
       };
 
@@ -649,6 +694,10 @@ const ChatInterface: React.FC = () => {
                   {m.role === 'user' ? <User className="w-5 h-5" /> : <Bot className="w-5 h-5 text-brand-400" />}
                 </div>
                 <div className="space-y-2">
+                  {m.image ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={m.image} alt="User uploaded" className="max-w-full h-auto rounded-lg" />
+                  ) : null}
                   <p className="text-sm whitespace-pre-wrap">{m.content || m.refusal || (m.audio ? 'Audio response returned.' : '')}</p>
                   {m.reasoning ? (
                     <p className="text-xs whitespace-pre-wrap rounded-lg bg-black/20 px-3 py-2 text-slate-400">
@@ -696,17 +745,42 @@ const ChatInterface: React.FC = () => {
         )}
       </div>
 
-      <form onSubmit={sendMessage} className="p-4 border-t border-white/10 bg-white/5 flex gap-2">
-        <input 
-          className="flex-1 input-field"
-          placeholder="Type your message..."
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          disabled={loading}
-        />
-        <button type="submit" className="btn-primary p-2 flex items-center justify-center aspect-square" disabled={loading}>
-          {loading ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
-        </button>
+      <form onSubmit={sendMessage} className="p-4 border-t border-white/10 bg-white/5 flex flex-col gap-2">
+        {selectedImage && (
+          <div className="flex items-center gap-2 p-2 rounded-lg bg-white/5">
+            <img src={selectedImage} alt="Thumbnail" className="w-16 h-16 object-cover rounded-md" />
+            <span className="text-sm text-slate-300">Image ready to send</span>
+            <button
+              type="button"
+              onClick={() => setSelectedImage(null)}
+              className="ml-auto p-1 rounded-full bg-white/10 hover:bg-white/20 text-slate-400 hover:text-white"
+            >
+              X
+            </button>
+          </div>
+        )}
+        <div className="flex gap-2">
+          <input
+            className="flex-1 input-field"
+            placeholder="Type your message..."
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            disabled={loading}
+          />
+          <label className="btn-primary p-2 flex items-center justify-center aspect-square cursor-pointer">
+            <input
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handleImageSelect}
+              disabled={loading}
+            />
+            🖼️
+          </label>
+          <button type="submit" className="btn-primary p-2 flex items-center justify-center aspect-square" disabled={loading}>
+            {loading ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+          </button>
+        </div>
       </form>
     </div>
   );

@@ -1,6 +1,7 @@
 import json
 from typing import Any, Dict, List, Optional
 
+import httpx
 from pydantic import BaseModel, ConfigDict
 
 from ..errors import ErrorType, GatewayError
@@ -83,6 +84,22 @@ def build_openai_chat_payload(
 		payload["max_tokens"] = request.max_completion_tokens
 
 	return payload
+
+
+async def send_streaming_json_request(
+	client: httpx.AsyncClient,
+	*,
+	url: str,
+	headers: Dict[str, str],
+	json_body: Dict[str, Any],
+) -> httpx.Response:
+	request = client.build_request(
+		"POST",
+		url,
+		headers=headers,
+		json=json_body,
+	)
+	return await client.send(request, stream=True)
 
 
 def request_uses_tools(request: ChatCompletionRequest) -> bool:

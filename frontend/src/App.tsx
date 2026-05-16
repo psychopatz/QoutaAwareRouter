@@ -39,6 +39,8 @@ const App: React.FC = () => {
   const [keyToTest, setKeyToTest] = useState<ApiKey | null>(null);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [keyToDelete, setKeyToDelete] = useState<ApiKey | null>(null);
+  const [isAddKeyModalOpen, setIsAddKeyModalOpen] = useState(false);
+  const [addKeyResult, setAddKeyResult] = useState<string | null>(null);
 
   const baseUrl = `http://127.0.0.1:7317/v1`;
 
@@ -62,17 +64,39 @@ const App: React.FC = () => {
   const addKey = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newKey.key) return;
+
+    // Check for duplicate keys before adding
+    const isDuplicate = keys.some(
+      (key) => key.service === newKey.service && key.key === newKey.key
+    );
+
+    if (isDuplicate) {
+      setIsAddKeyModalOpen(true);
+      setAddKeyResult('Error: This API key already exists for this service.');
+      return;
+    }
+
     setLoading(true);
+    setIsAddKeyModalOpen(true);
+    setAddKeyResult('Adding key...');
     try {
-      await fetch('/admin/keys', {
+      const response = await fetch('/admin/keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newKey),
       });
-      setNewKey({ ...newKey, key: '' });
-      fetchKeys();
+      const data = await response.json();
+      if (response.ok) {
+        setNewKey({ ...newKey, key: '' });
+        setAddKeyResult('Key added successfully!');
+        fetchKeys();
+      } else {
+        const message = data.message || data.detail || data.error?.message || 'Unknown error';
+        setAddKeyResult(`Failed to add key: ${message}`);
+      }
     } catch (error) {
       console.error('Failed to add key', error);
+      setAddKeyResult('Error: Failed to connect to server');
     } finally {
       setLoading(false);
     }
@@ -139,6 +163,16 @@ const App: React.FC = () => {
       return () => clearTimeout(timer);
     }
   }, [isTestModalOpen, testResult]);
+
+  useEffect(() => {
+    if (isAddKeyModalOpen && addKeyResult && addKeyResult !== 'Adding key...') {
+      const timer = setTimeout(() => {
+        setIsAddKeyModalOpen(false);
+        setAddKeyResult(null);
+      }, 6000); // Autoclose after 6 seconds
+      return () => clearTimeout(timer);
+    }
+  }, [isAddKeyModalOpen, addKeyResult]);
 
   const groupedKeys = keys.reduce((acc, key) => {
     if (!acc[key.service]) acc[key.service] = [];
@@ -426,6 +460,18 @@ const App: React.FC = () => {
           <div className="flex justify-end space-x-2 mt-4">
             <button onClick={() => setIsDeleteModalOpen(false)} className="btn-secondary">Cancel</button>
             <button onClick={deleteKey} className="btn-danger">Delete</button>
+          </div>
+        </Modal>
+
+        <Modal isOpen={isAddKeyModalOpen} onClose={() => setIsAddKeyModalOpen(false)} title="Add API Key Result">
+          <div className="space-y-4">
+            <p className="font-semibold">Result:</p>
+            <div className="bg-slate-700 p-3 rounded-md font-mono text-sm overflow-x-auto">
+              {addKeyResult}
+            </div>
+          </div>
+          <div className="flex justify-end space-x-2 mt-4">
+            <button onClick={() => setIsAddKeyModalOpen(false)} className="btn-secondary">Close</button>
           </div>
         </Modal>
       </main>

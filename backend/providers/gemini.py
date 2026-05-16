@@ -12,6 +12,7 @@ from .openai_compatible import (
 	extract_reasoning_mode,
 	infer_capabilities_from_model_metadata,
 	request_uses_audio_output,
+	send_streaming_json_request,
 )
 from ..errors import ErrorType, GatewayError
 from ..schemas import ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse
@@ -817,14 +818,11 @@ class GeminiProvider(BaseProvider):
 			await client.aclose()
 
 		try:
-			response = await client.send(
-				client.build_request(
-					"POST",
-					f"{self.base_url}/chat/completions",
-					headers=self.headers,
-					json=self.convert_request(stream_request),
-				),
-				stream=True,
+			response = await send_streaming_json_request(
+				client,
+				url=f"{self.base_url}/chat/completions",
+				headers=self.headers,
+				json_body=self.convert_request(stream_request),
 			)
 
 			if stream_control is not None:
@@ -856,14 +854,11 @@ class GeminiProvider(BaseProvider):
 			await client.aclose()
 
 		try:
-			response = await client.send(
-				client.build_request(
-					"POST",
-					f"{self.native_base_url}/{self._native_model_name(request.model)}:streamGenerateContent?alt=sse",
-					headers=self.native_headers,
-					json=self._native_payload(request),
-				),
-				stream=True,
+			response = await send_streaming_json_request(
+				client,
+				url=f"{self.native_base_url}/{self._native_model_name(request.model)}:streamGenerateContent?alt=sse",
+				headers=self.native_headers,
+				json_body=self._native_payload(request),
 			)
 
 			if stream_control is not None:

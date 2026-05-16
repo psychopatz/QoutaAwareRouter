@@ -11,6 +11,7 @@ from .openai_compatible import (
     build_openai_chat_payload,
     ensure_supported_request,
     infer_capabilities_from_model_metadata,
+    send_streaming_json_request,
 )
 
 class OpenRouterProvider(BaseProvider):
@@ -139,15 +140,11 @@ class OpenRouterProvider(BaseProvider):
             await client.aclose()
 
         try:
-            response = await client.send(
-                client.build_request(
-                    "POST",
-                    f"{self.base_url}/chat/completions",
-                    headers=self.headers,
-                    json=self.convert_request(request),
-                ),
-                stream=True,
-                timeout=self.timeout_seconds,
+            response = await send_streaming_json_request(
+                client,
+                url=f"{self.base_url}/chat/completions",
+                headers=self.headers,
+                json_body=self.convert_request(request),
             )
 
             if stream_control is not None:

@@ -1,4 +1,5 @@
 import pytest
+import httpx
 
 from backend.errors import ErrorType, GatewayError
 from backend.providers.ollama_cloud import OllamaCloudProvider
@@ -137,6 +138,46 @@ def test_openrouter_convert_response_injects_provider_metadata():
     assert response.provider.id == "openrouter-test"
     assert response.provider.actual_model == "openai/gpt-4o-mini"
     assert response.choices[0].message.tool_calls[0]["function"]["name"] == "lookup_price"
+
+
+@pytest.mark.asyncio
+async def test_openrouter_stream_chat_completion_uses_shared_stream_transport(monkeypatch):
+    original_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/v1/chat/completions"
+        assert request.headers["authorization"] == "Bearer or-test-key"
+        payload = request.read().decode("utf-8")
+        assert '"stream":true' in payload
+        return httpx.Response(
+            200,
+            content=(
+                'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hel"}}]}\n\n'
+                'data: [DONE]\n\n'
+            ).encode(),
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    def build_client(*args, **kwargs):
+        return original_async_client(transport=transport, *args, **kwargs)
+
+    monkeypatch.setattr("backend.providers.openrouter.httpx.AsyncClient", build_client)
+
+    provider = OpenRouterProvider(id="openrouter-test", type="openrouter", api_key="or-test-key")
+    request = ChatCompletionRequest(
+        model="openai/gpt-4o-mini",
+        messages=[{"role": "user", "content": "Say hello."}],
+    )
+
+    chunks = []
+    async for chunk in provider.stream_chat_completion(request):
+        chunks.append(chunk.decode())
+
+    body = "".join(chunks)
+    assert '"content":"Hel"' in body
+    assert body.endswith("data: [DONE]\n\n")
 
 
 def test_ollama_convert_response_normalizes_tool_call_arguments():

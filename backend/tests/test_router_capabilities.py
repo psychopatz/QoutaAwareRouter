@@ -300,6 +300,251 @@ def test_responses_support_previous_response_id(registry_backup):
     assert second.json()["output_text"] == "Second answer"
 
 
+def test_responses_support_function_call_output_items(registry_backup):
+    class FakeRouter:
+        def __init__(self):
+            self.calls = 0
+
+        async def route(self, request: ChatCompletionRequest):
+            self.calls += 1
+            if self.calls == 1:
+                assert [message.role for message in request.messages] == ["user"]
+                return ChatCompletionResponse(
+                    id="resp-chat-1",
+                    created=123,
+                    model=request.model,
+                    provider=ProviderMetadata(id="openrouter-primary", type="openrouter", actual_model="openai/gpt-4o-mini"),
+                    choices=[
+                        Choice(
+                            index=0,
+                            message=ResponseMessage(
+                                content=None,
+                                tool_calls=[
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "create_file",
+                                            "arguments": '{"path":"/tmp/test.txt"}',
+                                        },
+                                    }
+                                ],
+                            ),
+                            finish_reason="tool_calls",
+                        )
+                    ],
+                    usage=Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                )
+
+            assert [message.role for message in request.messages] == ["user", "assistant", "tool"]
+            assert request.messages[1].tool_calls[0]["id"] == "call_1"
+            assert request.messages[2].tool_call_id == "call_1"
+            assert request.messages[2].content == '{"created": false, "reason": "permission denied"}'
+
+            return ChatCompletionResponse(
+                id="resp-chat-2",
+                created=124,
+                model=request.model,
+                provider=ProviderMetadata(id="openrouter-primary", type="openrouter", actual_model="openai/gpt-4o-mini"),
+                choices=[
+                    Choice(
+                        index=0,
+                        message=ResponseMessage(content="Tool result received"),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=Usage(prompt_tokens=12, completion_tokens=3, total_tokens=15),
+            )
+
+    app = FastAPI()
+    responses_compat.set_router(FakeRouter())
+    app.include_router(responses_compat.router, prefix="/v1")
+    client = TestClient(app)
+
+    first = client.post("/v1/responses", json={"model": "default", "input": "create a file"})
+    assert first.status_code == 200
+    first_id = first.json()["id"]
+
+    second = client.post(
+        "/v1/responses",
+        json={
+            "model": "default",
+            "previous_response_id": first_id,
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": {"created": False, "reason": "permission denied"},
+                }
+            ],
+        },
+    )
+
+    assert second.status_code == 200
+    assert second.json()["output_text"] == "Tool result received"
+
+
+def test_responses_normalize_responses_function_tools_and_tool_choice(registry_backup):
+    class FakeRouter:
+        async def route(self, request: ChatCompletionRequest):
+            assert request.tools == [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "create_file",
+                        "description": "Create a file",
+                        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                    },
+                }
+            ]
+            assert request.tool_choice == {"type": "function", "function": {"name": "create_file"}}
+            return ChatCompletionResponse(
+                id="resp-chat-1",
+                created=123,
+                model=request.model,
+                provider=ProviderMetadata(id="openrouter-primary", type="openrouter", actual_model="openai/gpt-4o-mini"),
+                choices=[Choice(index=0, message=ResponseMessage(content="ok"), finish_reason="stop")],
+                usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+
+    app = FastAPI()
+    responses_compat.set_router(FakeRouter())
+    app.include_router(responses_compat.router, prefix="/v1")
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "default",
+            "input": "Create a file",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "create_file",
+                    "description": "Create a file",
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                }
+            ],
+            "tool_choice": {"type": "function", "name": "create_file"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["output_text"] == "ok"
+
+
+def test_responses_reject_unsupported_hosted_tool_types(registry_backup):
+    class FakeRouter:
+        async def route(self, request: ChatCompletionRequest):
+            raise AssertionError("route should not be called")
+
+    app = FastAPI()
+    responses_compat.set_router(FakeRouter())
+    app.include_router(responses_compat.router, prefix="/v1")
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "default",
+            "input": "Search project files",
+            "tools": [{"type": "file_search"}],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "unsupported_feature"
+    assert "file_search" in response.json()["error"]["message"]
+
+
+def test_responses_auto_execute_supported_file_tools(registry_backup, monkeypatch, tmp_path):
+    class FakeRouter:
+        def __init__(self):
+            self.calls = 0
+
+        async def route(self, request: ChatCompletionRequest):
+            self.calls += 1
+            if self.calls == 1:
+                assert request.tools[0]["function"]["name"] == "create_file"
+                return ChatCompletionResponse(
+                    id="resp-chat-1",
+                    created=123,
+                    model=request.model,
+                    provider=ProviderMetadata(id="openrouter-primary", type="openrouter", actual_model="openai/gpt-4o-mini"),
+                    choices=[
+                        Choice(
+                            index=0,
+                            message=ResponseMessage(
+                                content=None,
+                                tool_calls=[
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "create_file",
+                                            "arguments": '{"path":"docs/manual.md","content":"hello world"}',
+                                        },
+                                    }
+                                ],
+                            ),
+                            finish_reason="tool_calls",
+                        )
+                    ],
+                    usage=Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                )
+
+            assert [message.role for message in request.messages] == ["user", "assistant", "tool"]
+            assert request.messages[2].tool_call_id == "call_1"
+            tool_result = json.loads(request.messages[2].content)
+            assert tool_result["ok"] is True
+            assert tool_result["created"] is True
+            assert tool_result["path"] == "docs/manual.md"
+            assert (tmp_path / "docs" / "manual.md").read_text(encoding="utf-8") == "hello world"
+
+            return ChatCompletionResponse(
+                id="resp-chat-2",
+                created=124,
+                model=request.model,
+                provider=ProviderMetadata(id="openrouter-primary", type="openrouter", actual_model="openai/gpt-4o-mini"),
+                choices=[Choice(index=0, message=ResponseMessage(content="File created for real"), finish_reason="stop")],
+                usage=Usage(prompt_tokens=12, completion_tokens=3, total_tokens=15),
+            )
+
+    monkeypatch.setenv("QAROUTER_TOOL_ROOT", str(tmp_path))
+
+    app = FastAPI()
+    responses_compat.set_router(FakeRouter())
+    app.include_router(responses_compat.router, prefix="/v1")
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "default",
+            "input": "Create the manual file",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "create_file",
+                    "description": "Create a new file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                        "required": ["path", "content"],
+                    },
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["output_text"] == "File created for real"
+    assert (tmp_path / "docs" / "manual.md").exists()
+
+
 def test_responses_streaming_translates_chat_stream(registry_backup):
     class FakeRouter:
         async def route(self, request: ChatCompletionRequest):

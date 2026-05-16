@@ -9,12 +9,12 @@ from ..responses_schemas import ResponsesRequest
 from ..routing.router import Router
 from ..storage.responses import response_store
 from .responses_conversion import (
-    _assistant_message_from_chat_response,
     chat_completion_to_responses_response,
     responses_request_to_chat_request,
 )
 from .responses_streaming import persist_response
 from .responses_streaming import stream_responses as _stream_responses_impl
+from .tool_executor import route_with_auto_executed_tools
 
 router = APIRouter()
 
@@ -58,7 +58,10 @@ async def responses(request: ResponsesRequest):
                 media_type="text/event-stream",
             )
 
-        chat_response = await _router_instance.route(chat_request)
+        chat_response, conversation_messages = await route_with_auto_executed_tools(
+            _router_instance,
+            chat_request,
+        )
         response_id = f"resp_{uuid.uuid4().hex}"
         response = chat_completion_to_responses_response(
             chat_response,
@@ -69,7 +72,7 @@ async def responses(request: ResponsesRequest):
             response,
             request_messages,
             request,
-            [*request_messages, _assistant_message_from_chat_response(chat_response)],
+            conversation_messages,
             stored=bool(request.store),
         )
         return response

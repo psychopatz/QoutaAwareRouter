@@ -1,9 +1,11 @@
+import json
 from typing import Any, Dict, List, Optional
 
 from ..errors import ErrorType, GatewayError
 from ..responses_schemas import ResponsesOutputItem, ResponsesRequest, ResponsesResponse
 from ..schemas import ChatCompletionRequest
 from ..storage.responses import response_store
+from .tool_executor import normalize_responses_tool_choice, normalize_responses_tools
 
 
 def _normalize_response_input_part(part: Dict[str, Any]) -> Dict[str, Any]:
@@ -45,6 +47,35 @@ def _normalize_response_message(item: Dict[str, Any]) -> Dict[str, Any]:
     return message
 
 
+def _normalize_function_call_output_message(item: Dict[str, Any]) -> Dict[str, Any]:
+    call_id = item.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        raise GatewayError(
+            "function_call_output items require a non-empty call_id",
+            type=ErrorType.UNSUPPORTED_FEATURE,
+            status_code=400,
+        )
+
+    output = item.get("output", "")
+    if isinstance(output, str):
+        normalized_output = output
+    elif output is None:
+        normalized_output = ""
+    else:
+        normalized_output = json.dumps(output)
+
+    message = {
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": normalized_output,
+    }
+
+    if item.get("name"):
+        message["name"] = item["name"]
+
+    return message
+
+
 def _response_format_from_request(request: ResponsesRequest) -> Optional[Dict[str, Any]]:
     if request.response_format is not None:
         return request.response_format
@@ -78,16 +109,30 @@ def _normalize_request_messages(request: ResponsesRequest) -> List[Dict[str, Any
     if isinstance(request.input, str):
         messages.append({"role": "user", "content": request.input})
     else:
-        if request.input and all(item.get("type") == "message" for item in request.input if isinstance(item, dict)):
-            for item in request.input:
+        pending_user_parts: List[Dict[str, Any]] = []
+
+        def flush_pending_user_parts() -> None:
+            if not pending_user_parts:
+                return
+            messages.append({"role": "user", "content": list(pending_user_parts)})
+            pending_user_parts.clear()
+
+        for item in request.input:
+            item_type = item.get("type") if isinstance(item, dict) else None
+
+            if item_type == "message":
+                flush_pending_user_parts()
                 messages.append(_normalize_response_message(item))
-        else:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": [_normalize_response_input_part(part) for part in request.input],
-                }
-            )
+                continue
+
+            if item_type == "function_call_output":
+                flush_pending_user_parts()
+                messages.append(_normalize_function_call_output_message(item))
+                continue
+
+            pending_user_parts.append(_normalize_response_input_part(item))
+
+        flush_pending_user_parts()
 
     return messages
 
@@ -100,8 +145,8 @@ def responses_request_to_chat_request(request: ResponsesRequest) -> ChatCompleti
         model=request.model,
         messages=messages,
         stream=bool(request.stream),
-        tools=request.tools,
-        tool_choice=request.tool_choice,
+        tools=normalize_responses_tools(request.tools),
+        tool_choice=normalize_responses_tool_choice(request.tool_choice),
         parallel_tool_calls=request.parallel_tool_calls,
         modalities=request.modalities,
         audio=request.audio,

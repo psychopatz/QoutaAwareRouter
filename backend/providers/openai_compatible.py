@@ -162,9 +162,6 @@ def unsupported_request_features(
 	if has_forced_tool_choice(request) and not capabilities.supports_tool_choice:
 		unsupported.append("forced tool choice")
 
-	if request.parallel_tool_calls is not None and not capabilities.supports_parallel_tool_calls:
-		unsupported.append("parallel tool calls")
-
 	if request_uses_vision(request) and not capabilities.supports_vision_input:
 		unsupported.append("vision input")
 

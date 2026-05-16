@@ -12,6 +12,7 @@ from .openai_compatible import (
     convert_messages_to_ollama,
     ensure_supported_request,
     extract_reasoning_mode,
+    infer_capabilities_from_model_metadata,
     normalize_tool_calls_from_ollama,
     ollama_response_format,
 )
@@ -48,6 +49,92 @@ class OllamaCloudProvider(BaseProvider):
                 headers["Authorization"] = f"Bearer {key}"
         return headers
 
+    def _cached_model_info(self, model_id: str):
+        for model in self._models_cache.get("models", []):
+            if model.id == model_id:
+                return model
+        return None
+
+    def _capabilities_for_model_hint(self, model_id: str) -> ProviderCapabilities:
+        return self.effective_capabilities_for_model(model_id, self._cached_model_info(model_id))
+
+    def _normalize_show_capabilities(self, capabilities: Any) -> set[str]:
+        normalized = set()
+        for capability in capabilities or []:
+            if not isinstance(capability, str):
+                continue
+            normalized.add(capability.strip().lower().replace("-", "_").replace(" ", "_"))
+        return normalized
+
+    def _extract_context_length(self, show_data: Dict[str, Any]) -> Optional[int]:
+        model_info = show_data.get("model_info") or {}
+        for key, value in model_info.items():
+            if not isinstance(key, str) or not key.endswith(".context_length"):
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _infer_model_capabilities(self, show_data: Dict[str, Any]) -> ProviderCapabilities:
+        capability_names = self._normalize_show_capabilities(show_data.get("capabilities"))
+        if not capability_names:
+            return self.capabilities.model_copy()
+
+        supported_parameters: List[str] = []
+        input_modalities = ["text"]
+
+        if {"tools", "tool_calling", "tool"} & capability_names:
+            supported_parameters.append("tools")
+            supported_parameters.append("parallel_tool_calls")
+
+        if {"thinking", "reasoning"} & capability_names:
+            supported_parameters.append("reasoning_effort")
+
+        if {"vision", "image", "multimodal"} & capability_names:
+            input_modalities.append("image")
+
+        inferred = infer_capabilities_from_model_metadata(
+            supported_parameters=supported_parameters,
+            input_modalities=input_modalities,
+            output_modalities=["text"],
+        )
+
+        return self.capabilities.model_copy(
+            update={
+                "supports_tools": inferred.supports_tools,
+                "supports_parallel_tool_calls": inferred.supports_parallel_tool_calls,
+                "supports_vision_input": inferred.supports_vision_input,
+                "supports_reasoning": inferred.supports_reasoning if inferred.supports_reasoning else self.capabilities.supports_reasoning,
+            }
+        )
+
+    def _supported_parameters_for_capabilities(self, capabilities: ProviderCapabilities) -> List[str]:
+        supported_parameters: List[str] = []
+        if capabilities.supports_tools:
+            supported_parameters.append("tools")
+        if capabilities.supports_parallel_tool_calls:
+            supported_parameters.append("parallel_tool_calls")
+        if capabilities.supports_reasoning:
+            supported_parameters.append("reasoning_effort")
+        if capabilities.supports_response_format:
+            supported_parameters.append("response_format")
+        return supported_parameters
+
+    async def _fetch_show_data(self, client: httpx.AsyncClient, model_id: str) -> Dict[str, Any]:
+        try:
+            response = await client.post(
+                f"{self.base_url}/api/show",
+                headers=self._get_headers(),
+                json={"model": model_id},
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as error:
+            logger.debug(f"Failed to fetch Ollama show metadata for {self.id}/{model_id}: {error}")
+            return {}
+
     async def list_models(self) -> List[ProviderModel]:
         if time.time() - self._models_cache["timestamp"] < 300 and self._models_cache["models"]:
             return self._models_cache["models"]
@@ -57,15 +144,23 @@ class OllamaCloudProvider(BaseProvider):
                 response = await client.get(f"{self.base_url}/api/tags", headers=self._get_headers())
                 response.raise_for_status()
                 data = response.json()
+                listed_models = data.get("models", [])
+
                 models = []
-                for model_data in data.get("models", []):
+                for model_data in listed_models:
                     details = model_data.get("details") or {}
+                    show_data = await self._fetch_show_data(client, model_data["name"])
+                    capabilities = self._infer_model_capabilities(show_data)
                     models.append(
                         ProviderModel(
                             id=model_data["name"],
                             name=model_data["name"],
-                            capabilities=self.capabilities.model_copy(),
-                            raw={"details": details, "digest": model_data.get("digest")},
+                            context_length=self._extract_context_length(show_data),
+                            input_modalities=["text", "image"] if capabilities.supports_vision_input else ["text"],
+                            output_modalities=["text"],
+                            supported_parameters=self._supported_parameters_for_capabilities(capabilities),
+                            capabilities=capabilities,
+                            raw={"details": details, "digest": model_data.get("digest"), "show": show_data},
                         )
                     )
 
@@ -146,7 +241,11 @@ class OllamaCloudProvider(BaseProvider):
             await client.aclose()
 
     def convert_request(self, openai_request: ChatCompletionRequest) -> Dict[str, Any]:
-        ensure_supported_request(openai_request, self.capabilities, self.id)
+        ensure_supported_request(
+            openai_request,
+            self._capabilities_for_model_hint(openai_request.model),
+            f"{self.id}/{openai_request.model}",
+        )
         messages = convert_messages_to_ollama(openai_request.messages)
 
         payload = {

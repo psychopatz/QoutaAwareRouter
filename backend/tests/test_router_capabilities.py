@@ -196,6 +196,59 @@ async def test_router_skips_unsupported_model_candidate(registry_backup):
     assert registry._active_instances["openrouter-second"].calls == 1
 
 
+@pytest.mark.asyncio
+async def test_router_allows_serial_tool_fallback_when_parallel_flag_requested(registry_backup):
+    registry._active_instances = {
+        "ollama-first": FakeProvider(
+            id="ollama-first",
+            type="ollama_cloud",
+            supported_models=["qwen3-coder:480b"],
+            response_text="serial tool fallback works",
+            model_capabilities=ProviderCapabilities(
+                supports_tools=True,
+                supports_tool_choice=True,
+                supports_parallel_tool_calls=False,
+                supports_vision_input=False,
+                supports_audio_input=False,
+                supports_audio_output=False,
+                supports_reasoning=False,
+                supports_response_format=False,
+            ),
+        ),
+    }
+
+    alias_manager = ModelAliasManager(
+        {
+            "default": {
+                "candidates": [
+                    {"provider": "ollama-first", "model": "qwen3-coder:480b"},
+                ]
+            }
+        }
+    )
+    router = Router(alias_manager, {})
+
+    response = await router.route(
+        ChatCompletionRequest(
+            model="default",
+            messages=[{"role": "user", "content": "Use the lookup tool"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "lookup_price",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            parallel_tool_calls=True,
+        )
+    )
+
+    assert response.choices[0].message.content == "serial tool fallback works"
+    assert registry._active_instances["ollama-first"].calls == 1
+
+
 def test_responses_endpoint_wraps_chat_completions(registry_backup):
     class FakeRouter:
         async def route(self, request: ChatCompletionRequest):

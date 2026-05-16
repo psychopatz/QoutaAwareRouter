@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, User, Bot, RefreshCw, Copy, Check } from 'lucide-react';
+import { Send, User, Bot, RefreshCw, Copy, Check, Brain, Eye, Wrench, AudioLines, Braces } from 'lucide-react';
+
+import type { LucideIcon } from 'lucide-react';
 
 interface Model {
   id: string;
@@ -10,8 +12,20 @@ interface Model {
   pricing?: Record<string, string> | null;
   output_modalities?: string[];
   capabilities?: {
+    supports_tools?: boolean;
+    supports_parallel_tool_calls?: boolean;
+    supports_vision_input?: boolean;
     supports_audio_output?: boolean;
+    supports_reasoning?: boolean;
+    supports_response_format?: boolean;
   } | null;
+}
+
+interface ModelCapabilityBadge {
+  key: string;
+  label: string;
+  icon: LucideIcon;
+  className: string;
 }
 
 interface ProviderInfo {
@@ -72,6 +86,39 @@ const GEMINI_SAFETY_THRESHOLDS = [
   { value: 'OFF', label: 'Off' },
 ];
 
+const MODEL_CAPABILITY_BADGES: ModelCapabilityBadge[] = [
+  {
+    key: 'supports_reasoning',
+    label: 'Thinking',
+    icon: Brain,
+    className: 'border-amber-400/30 bg-amber-500/15 text-amber-200',
+  },
+  {
+    key: 'supports_vision_input',
+    label: 'Vision',
+    icon: Eye,
+    className: 'border-sky-400/30 bg-sky-500/15 text-sky-200',
+  },
+  {
+    key: 'supports_tools',
+    label: 'Tools',
+    icon: Wrench,
+    className: 'border-emerald-400/30 bg-emerald-500/15 text-emerald-200',
+  },
+  {
+    key: 'supports_audio_output',
+    label: 'Audio',
+    icon: AudioLines,
+    className: 'border-fuchsia-400/30 bg-fuchsia-500/15 text-fuchsia-200',
+  },
+  {
+    key: 'supports_response_format',
+    label: 'JSON',
+    icon: Braces,
+    className: 'border-violet-400/30 bg-violet-500/15 text-violet-200',
+  },
+];
+
 const createInitialGeminiSafetySettings = (): GeminiSafetySettings => (
   GEMINI_SAFETY_CATEGORIES.reduce<GeminiSafetySettings>((settings, category) => {
     settings[category.key] = '';
@@ -106,6 +153,7 @@ const ChatInterface: React.FC = () => {
   ]);
   const [showGeminiSettings, setShowGeminiSettings] = useState(false);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [showFreeModelsOnly, setShowFreeModelsOnly] = useState(false);
 
   const trimServicePrefix = (service: string, modelId: string) => {
     const prefix = `${service}/`;
@@ -114,13 +162,26 @@ const ChatInterface: React.FC = () => {
 
   const formatServiceLabel = (service: string) => service.replace(/_/g, ' ');
 
+  const getModelCapabilityBadges = (model?: Model) => {
+    if (!model?.capabilities) {
+      return [];
+    }
+
+    return MODEL_CAPABILITY_BADGES.filter((badge) => Boolean(model.capabilities?.[badge.key as keyof NonNullable<Model['capabilities']>]));
+  };
+
   const selectedModelInfo = models.find((model) => trimServicePrefix(selectedService, model.id) === selectedModel);
+  const selectedModelBadges = getModelCapabilityBadges(selectedModelInfo);
   const geminiSupportsAudioOutput = selectedService === 'gemini' && Boolean(
     selectedModelInfo?.capabilities?.supports_audio_output || selectedModelInfo?.output_modalities?.includes('audio')
   );
   const freeModelCount = models.filter((model) => model.is_free).length;
   const filteredModels = models
     .filter((model) => {
+      if (showFreeModelsOnly && !model.is_free) {
+        return false;
+      }
+
       const modelName = trimServicePrefix(selectedService, model.id).toLowerCase();
       const displayName = (model.name || '').toLowerCase();
       const query = selectedModel.toLowerCase();
@@ -472,6 +533,22 @@ const ChatInterface: React.FC = () => {
             {models.length ? `${models.length} models loaded${freeModelCount ? ` · ${freeModelCount} free` : ''}` : 'No models loaded'}
             {selectedModelInfo?.is_free ? ' · selected model is free' : ''}
           </p>
+          {selectedModelBadges.length ? (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {selectedModelBadges.map((badge) => {
+                const Icon = badge.icon;
+                return (
+                  <span
+                    key={badge.key}
+                    className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-medium uppercase tracking-wide ${badge.className}`}
+                  >
+                    <Icon className="h-3 w-3" />
+                    {badge.label}
+                  </span>
+                );
+              })}
+            </div>
+          ) : null}
         </div>
         <div className="flex items-center gap-2">
           <select
@@ -493,10 +570,26 @@ const ChatInterface: React.FC = () => {
             />
             {isModelPickerOpen && (
               <div className="absolute top-[calc(100%+0.5rem)] z-20 w-full overflow-hidden rounded-xl border border-white/10 bg-slate-950/95 shadow-2xl backdrop-blur-md">
+                <div className="flex items-center justify-between border-b border-white/10 px-3 py-2 text-xs text-slate-400">
+                  <span>
+                    {filteredModels.length} shown
+                    {showFreeModelsOnly ? ` · free only` : ''}
+                  </span>
+                  <label className="inline-flex cursor-pointer items-center gap-2 text-slate-300">
+                    <input
+                      type="checkbox"
+                      className="h-3.5 w-3.5 rounded border-white/20 bg-slate-900 text-brand-400"
+                      checked={showFreeModelsOnly}
+                      onChange={(event) => setShowFreeModelsOnly(event.target.checked)}
+                    />
+                    Free only
+                  </label>
+                </div>
                 <div className="max-h-80 overflow-y-auto">
                   {filteredModels.length ? filteredModels.map((model) => {
                     const modelName = trimServicePrefix(selectedService, model.id);
                     const isSelected = modelName === selectedModel;
+                    const badges = getModelCapabilityBadges(model);
                     return (
                       <button
                         key={model.id}
@@ -515,6 +608,23 @@ const ChatInterface: React.FC = () => {
                             </span>
                           ) : null}
                         </div>
+                        {badges.length ? (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {badges.map((badge) => {
+                              const Icon = badge.icon;
+                              return (
+                                <span
+                                  key={badge.key}
+                                  className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${badge.className}`}
+                                  title={badge.label}
+                                >
+                                  <Icon className="h-3 w-3" />
+                                  {badge.label}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        ) : null}
                         {model.description ? (
                           <p className="mt-1 line-clamp-2 text-xs text-slate-500">{model.description}</p>
                         ) : null}

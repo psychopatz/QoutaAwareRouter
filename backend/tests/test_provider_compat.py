@@ -4,6 +4,8 @@ import httpx
 from backend.errors import ErrorType, GatewayError
 from backend.providers.ollama_cloud import OllamaCloudProvider
 from backend.providers.openrouter import OpenRouterProvider
+from backend.providers.base import ProviderModel
+from backend.providers.openai_compatible import ProviderCapabilities
 from backend.schemas import ChatCompletionRequest
 
 
@@ -95,6 +97,107 @@ def test_ollama_headers_use_current_config_api_key():
 
     provider.config["api_key"] = "second-key"
     assert provider._get_headers()["Authorization"] == "Bearer second-key"
+
+
+@pytest.mark.asyncio
+async def test_ollama_list_models_infers_capabilities_from_show_metadata(monkeypatch):
+    original_async_client = httpx.AsyncClient
+    show_responses = {
+        "qwen3": {
+            "capabilities": ["completion", "tools", "thinking"],
+            "model_info": {"qwen3.context_length": 32768},
+        },
+        "gemma3": {
+            "capabilities": ["completion", "vision"],
+            "model_info": {"gemma3.context_length": 131072},
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {"name": "qwen3", "digest": "digest-qwen", "details": {"family": "qwen"}},
+                        {"name": "gemma3", "digest": "digest-gemma", "details": {"family": "gemma"}},
+                    ]
+                },
+            )
+
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    transport = httpx.MockTransport(handler)
+
+    def build_client(*args, **kwargs):
+        return original_async_client(transport=transport, *args, **kwargs)
+
+    monkeypatch.setattr("backend.providers.ollama_cloud.httpx.AsyncClient", build_client)
+
+    async def fake_fetch_show_data(self, client, model_id):
+        return show_responses[model_id]
+
+    monkeypatch.setattr(OllamaCloudProvider, "_fetch_show_data", fake_fetch_show_data)
+
+    provider = OllamaCloudProvider(id="ollama-test", type="ollama_cloud", base_url="http://ollama.test")
+    models = await provider.list_models()
+
+    qwen_model = next(model for model in models if model.id == "qwen3")
+    gemma_model = next(model for model in models if model.id == "gemma3")
+
+    assert qwen_model.context_length == 32768
+    assert qwen_model.capabilities.supports_tools is True
+    assert qwen_model.capabilities.supports_parallel_tool_calls is True
+    assert qwen_model.capabilities.supports_vision_input is False
+    assert "tools" in qwen_model.supported_parameters
+
+    assert gemma_model.context_length == 131072
+    assert gemma_model.capabilities.supports_tools is False
+    assert gemma_model.capabilities.supports_vision_input is True
+    assert gemma_model.input_modalities == ["text", "image"]
+
+
+def test_ollama_convert_request_uses_cached_model_capabilities():
+    provider = OllamaCloudProvider(id="ollama-test", type="ollama_cloud")
+    provider._models_cache = {
+        "timestamp": 1.0,
+        "models": [
+            ProviderModel(
+                id="gemma3",
+                name="gemma3",
+                capabilities=ProviderCapabilities(
+                    supports_tools=False,
+                    supports_tool_choice=False,
+                    supports_parallel_tool_calls=False,
+                    supports_vision_input=True,
+                    supports_audio_input=False,
+                    supports_audio_output=False,
+                    supports_reasoning=True,
+                    supports_response_format=True,
+                ),
+            )
+        ],
+    }
+
+    request = ChatCompletionRequest(
+        model="gemma3",
+        messages=[{"role": "user", "content": "Use a tool"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup_price",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        provider.convert_request(request)
+
+    assert exc_info.value.type == ErrorType.UNSUPPORTED_FEATURE
+    assert "tool calling" in exc_info.value.message
 
 
 def test_openrouter_convert_response_injects_provider_metadata():

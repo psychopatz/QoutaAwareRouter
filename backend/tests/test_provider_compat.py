@@ -157,6 +157,51 @@ async def test_ollama_list_models_infers_capabilities_from_show_metadata(monkeyp
     assert gemma_model.input_modalities == ["text", "image"]
 
 
+@pytest.mark.asyncio
+async def test_ollama_list_models_limits_show_fetches_to_configured_models(monkeypatch):
+    original_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {"name": "qwen3-coder:480b", "digest": "digest-qwen", "details": {}},
+                        {"name": "gemma3", "digest": "digest-gemma", "details": {}},
+                    ]
+                },
+            )
+
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    transport = httpx.MockTransport(handler)
+
+    def build_client(*args, **kwargs):
+        return original_async_client(transport=transport, *args, **kwargs)
+
+    monkeypatch.setattr("backend.providers.ollama_cloud.httpx.AsyncClient", build_client)
+
+    seen_models = []
+
+    async def fake_fetch_show_data(self, client, model_id):
+        seen_models.append(model_id)
+        return {"capabilities": ["completion", "tools"]}
+
+    monkeypatch.setattr(OllamaCloudProvider, "_fetch_show_data", fake_fetch_show_data)
+
+    provider = OllamaCloudProvider(
+        id="ollama-test",
+        type="ollama_cloud",
+        base_url="http://ollama.test",
+        supported_models=["qwen3-coder:480b"],
+    )
+    models = await provider.list_models()
+
+    assert [model.id for model in models] == ["qwen3-coder:480b"]
+    assert seen_models == ["qwen3-coder:480b"]
+
+
 def test_ollama_convert_request_uses_cached_model_capabilities():
     provider = OllamaCloudProvider(id="ollama-test", type="ollama_cloud")
     provider._models_cache = {

@@ -36,6 +36,26 @@ class Router:
             return
         storage.record_key_usage(dynamic_key.id, provider.id, model)
 
+    def _key_candidates(self, storage, provider):
+        original_api_key = provider.config.get("api_key")
+        dynamic_keys = storage.get_keys_by_service(provider.type)
+        active_keys = [key for key in dynamic_keys if key.status == "active"]
+
+        candidates = list(active_keys)
+        has_static_fallback = bool(original_api_key) and all(key.key != original_api_key for key in active_keys)
+        if has_static_fallback or not candidates:
+            candidates.append(None)
+
+        return original_api_key, candidates
+
+    def _apply_key_candidate(self, provider, dynamic_key, original_api_key):
+        if dynamic_key is not None:
+            provider.config["api_key"] = dynamic_key.key
+        elif original_api_key:
+            provider.config["api_key"] = original_api_key
+        else:
+            provider.config.pop("api_key", None)
+
     def _handle_dynamic_key_error(self, storage, dynamic_key, error: GatewayError) -> bool:
         if dynamic_key is None:
             return False
@@ -160,64 +180,62 @@ class Router:
 
             # Dynamic Key Logic (Phase 4 integration)
             from ..storage.sqlite import storage
-            dynamic_keys = storage.get_keys_by_service(provider.type)
-            active_keys = [k for k in dynamic_keys if k.status == "active"]
-            
-            # If we have dynamic keys, use them. Otherwise use provider's static key.
-            keys_to_try = active_keys if active_keys else [None]
-            
-            for d_key in keys_to_try:
-                if d_key:
-                    # Pass the key to the provider temporarily
-                    provider.config["api_key"] = d_key.key
-                    self._record_key_attempt(storage, d_key, provider, candidate.model)
-                
-                try:
-                    logger.info(f"Routing request to provider={provider.id}, model={candidate.model} using key_id={d_key.id if d_key else 'default'}")
-                    response = await provider.chat_completion(provider_request)
-                    latency = (time.time() - start_time) * 1000
-                    
-                    traffic_manager.add_log(TrafficLog(
-                        id=str(uuid.uuid4()),
-                        timestamp=time.time(),
-                        method="POST",
-                        path="/v1/chat/completions",
-                        model=request.model,
-                        provider_id=provider.id,
-                        key_id=d_key.id if d_key else None,
-                        key_suffix=d_key.key[-4:] if d_key else None,
-                        status_code=200,
-                        latency_ms=latency
-                    ))
-                    
-                    response.model = request.model
-                    return response
-                except GatewayError as e:
-                    latency = (time.time() - start_time) * 1000
-                    traffic_manager.add_log(TrafficLog(
-                        id=str(uuid.uuid4()),
-                        timestamp=time.time(),
-                        method="POST",
-                        path="/v1/chat/completions",
-                        model=request.model,
-                        provider_id=provider.id,
-                        key_id=d_key.id if d_key else None,
-                        key_suffix=d_key.key[-4:] if d_key else None,
-                        status_code=e.status_code,
-                        latency_ms=latency,
-                        error=e.message
-                    ))
-                    
-                    if self._handle_dynamic_key_error(storage, d_key, e):
-                        continue # Try next key
-                    
-                    logger.warning(f"Provider {provider.id} failed: {e.message}")
-                    errors.append(e)
-                    break # Try next provider candidate
-                except Exception as e:
-                    logger.error(f"Unexpected error from provider {provider.id}: {e}")
-                    errors.append(GatewayError(str(e), provider_id=provider.id))
-                    break # Try next provider candidate
+            original_api_key, keys_to_try = self._key_candidates(storage, provider)
+
+            try:
+                for d_key in keys_to_try:
+                    self._apply_key_candidate(provider, d_key, original_api_key)
+                    if d_key:
+                        self._record_key_attempt(storage, d_key, provider, candidate.model)
+
+                    try:
+                        logger.info(f"Routing request to provider={provider.id}, model={candidate.model} using key_id={d_key.id if d_key else 'default'}")
+                        response = await provider.chat_completion(provider_request)
+                        latency = (time.time() - start_time) * 1000
+
+                        traffic_manager.add_log(TrafficLog(
+                            id=str(uuid.uuid4()),
+                            timestamp=time.time(),
+                            method="POST",
+                            path="/v1/chat/completions",
+                            model=request.model,
+                            provider_id=provider.id,
+                            key_id=d_key.id if d_key else None,
+                            key_suffix=d_key.key[-4:] if d_key else None,
+                            status_code=200,
+                            latency_ms=latency
+                        ))
+
+                        response.model = request.model
+                        return response
+                    except GatewayError as e:
+                        latency = (time.time() - start_time) * 1000
+                        traffic_manager.add_log(TrafficLog(
+                            id=str(uuid.uuid4()),
+                            timestamp=time.time(),
+                            method="POST",
+                            path="/v1/chat/completions",
+                            model=request.model,
+                            provider_id=provider.id,
+                            key_id=d_key.id if d_key else None,
+                            key_suffix=d_key.key[-4:] if d_key else None,
+                            status_code=e.status_code,
+                            latency_ms=latency,
+                            error=e.message
+                        ))
+
+                        if self._handle_dynamic_key_error(storage, d_key, e):
+                            continue
+
+                        logger.warning(f"Provider {provider.id} failed: {e.message}")
+                        errors.append(e)
+                        break
+                    except Exception as e:
+                        logger.error(f"Unexpected error from provider {provider.id}: {e}")
+                        errors.append(GatewayError(str(e), provider_id=provider.id))
+                        break
+            finally:
+                self._apply_key_candidate(provider, None, original_api_key)
 
         # If we reached here, all candidates failed
         if errors:
@@ -267,80 +285,80 @@ class Router:
             for candidate, provider, provider_request in routed_candidates:
                 
                 from ..storage.sqlite import storage
-                dynamic_keys = storage.get_keys_by_service(provider.type)
-                active_keys = [k for k in dynamic_keys if k.status == "active"]
-                keys_to_try = active_keys if active_keys else [None]
-                
-                for d_key in keys_to_try:
-                    if d_key:
-                        provider.config["api_key"] = d_key.key
-                        self._record_key_attempt(storage, d_key, provider, candidate.model)
-                        
-                    chunks_yielded = False
-                    log_id_iter = str(uuid.uuid4())
-                    try:
-                        logger.info(f"Stream routing to provider={provider.id}, model={candidate.model}")
+                original_api_key, keys_to_try = self._key_candidates(storage, provider)
 
-                        if on_provider_selected is not None:
-                            on_provider_selected(
-                                {
-                                    "id": provider.id,
-                                    "type": provider.type,
-                                    "actual_model": candidate.model,
-                                }
-                            )
-                        
-                        async for chunk in provider.stream_chat_completion(provider_request, stream_control=stream_control):
-                            chunks_yielded = True
-                            if chunk:
-                                yield chunk
-                                
-                        traffic_manager.add_log(TrafficLog(
-                            id=log_id_iter,
-                            timestamp=time.time(),
-                            method="POST",
-                            path="/v1/chat/completions/stream",
-                            model=request.model,
-                            provider_id=provider.id,
-                            key_id=d_key.id if d_key else None,
-                            key_suffix=d_key.key[-4:] if d_key else None,
-                            status_code=200,
-                            latency_ms=(time.time() - start_time) * 1000
-                        ))
-                        return
-                        
-                    except Exception as general_e:
-                        if stream_control is not None and stream_control.cancelled:
+                try:
+                    for d_key in keys_to_try:
+                        self._apply_key_candidate(provider, d_key, original_api_key)
+                        if d_key:
+                            self._record_key_attempt(storage, d_key, provider, candidate.model)
+
+                        chunks_yielded = False
+                        log_id_iter = str(uuid.uuid4())
+                        try:
+                            logger.info(f"Stream routing to provider={provider.id}, model={candidate.model}")
+
+                            if on_provider_selected is not None:
+                                on_provider_selected(
+                                    {
+                                        "id": provider.id,
+                                        "type": provider.type,
+                                        "actual_model": candidate.model,
+                                    }
+                                )
+
+                            async for chunk in provider.stream_chat_completion(provider_request, stream_control=stream_control):
+                                chunks_yielded = True
+                                if chunk:
+                                    yield chunk
+
+                            traffic_manager.add_log(TrafficLog(
+                                id=log_id_iter,
+                                timestamp=time.time(),
+                                method="POST",
+                                path="/v1/chat/completions/stream",
+                                model=request.model,
+                                provider_id=provider.id,
+                                key_id=d_key.id if d_key else None,
+                                key_suffix=d_key.key[-4:] if d_key else None,
+                                status_code=200,
+                                latency_ms=(time.time() - start_time) * 1000
+                            ))
                             return
 
-                        # Wrap non-gateway errors
-                        e = general_e if isinstance(general_e, GatewayError) else GatewayError(str(general_e), provider_id=provider.id)
-                        
-                        if chunks_yielded:
-                            logger.error(f"Stream broken mid-way: {e}")
-                            err_payload = json.dumps({"error": {"message": f"Stream interrupted: {e.message}"}})
-                            yield f"data: {err_payload}\n\n".encode()
-                            return
-                            
-                        traffic_manager.add_log(TrafficLog(
-                            id=log_id_iter,
-                            timestamp=time.time(),
-                            method="POST",
-                            path="/v1/chat/completions/stream",
-                            model=request.model,
-                            provider_id=provider.id,
-                            key_id=d_key.id if d_key else None,
-                            key_suffix=d_key.key[-4:] if d_key else None,
-                            status_code=e.status_code,
-                            latency_ms=(time.time() - start_time) * 1000,
-                            error=e.message
-                        ))
-                        
-                        if self._handle_dynamic_key_error(storage, d_key, e):
-                            continue
-                            
-                        errors.append(e)
-                        break
+                        except Exception as general_e:
+                            if stream_control is not None and stream_control.cancelled:
+                                return
+
+                            e = general_e if isinstance(general_e, GatewayError) else GatewayError(str(general_e), provider_id=provider.id)
+
+                            if chunks_yielded:
+                                logger.error(f"Stream broken mid-way: {e}")
+                                err_payload = json.dumps({"error": {"message": f"Stream interrupted: {e.message}"}})
+                                yield f"data: {err_payload}\n\n".encode()
+                                return
+
+                            traffic_manager.add_log(TrafficLog(
+                                id=log_id_iter,
+                                timestamp=time.time(),
+                                method="POST",
+                                path="/v1/chat/completions/stream",
+                                model=request.model,
+                                provider_id=provider.id,
+                                key_id=d_key.id if d_key else None,
+                                key_suffix=d_key.key[-4:] if d_key else None,
+                                status_code=e.status_code,
+                                latency_ms=(time.time() - start_time) * 1000,
+                                error=e.message
+                            ))
+
+                            if self._handle_dynamic_key_error(storage, d_key, e):
+                                continue
+
+                            errors.append(e)
+                            break
+                finally:
+                    self._apply_key_candidate(provider, None, original_api_key)
 
             last_err = errors[-1].message if errors else "No healthy streaming providers found"
             err_payload = json.dumps({"error": {"message": f"All providers failed. Last error: {last_err}"}})

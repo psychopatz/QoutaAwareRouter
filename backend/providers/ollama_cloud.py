@@ -122,6 +122,17 @@ class OllamaCloudProvider(BaseProvider):
             supported_parameters.append("response_format")
         return supported_parameters
 
+    def _configured_model_ids(self) -> set[str]:
+        return {model_id for model_id in self.supported_models if isinstance(model_id, str) and model_id}
+
+    def _filter_listed_models(self, listed_models: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        configured_model_ids = self._configured_model_ids()
+        if not configured_model_ids:
+            return listed_models
+
+        filtered = [model_data for model_data in listed_models if model_data.get("name") in configured_model_ids]
+        return filtered or listed_models
+
     async def _fetch_show_data(self, client: httpx.AsyncClient, model_id: str) -> Dict[str, Any]:
         try:
             response = await client.post(
@@ -144,7 +155,7 @@ class OllamaCloudProvider(BaseProvider):
                 response = await client.get(f"{self.base_url}/api/tags", headers=self._get_headers())
                 response.raise_for_status()
                 data = response.json()
-                listed_models = data.get("models", [])
+                listed_models = self._filter_listed_models(data.get("models", []))
 
                 models = []
                 for model_data in listed_models:

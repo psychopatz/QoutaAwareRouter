@@ -93,6 +93,53 @@ class SuccessProvider(BaseProvider):
         return GatewayError(str(error))
 
 
+class DynamicThenStaticProvider(BaseProvider):
+    def default_capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities()
+
+    async def list_models(self):
+        return [ProviderModel(id=self.supported_models[0], name=self.supported_models[0])]
+
+    async def health_check(self):
+        return ProviderHealth(healthy=True)
+
+    async def chat_completion(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+        current_key = self.config.get("api_key")
+        if current_key == "dynamic-key":
+            raise GatewayError(
+                "Quota exhausted for this key. Upgrade for higher limits.",
+                type=ErrorType.RATE_LIMITED,
+                provider_id=self.id,
+                status_code=429,
+            )
+
+        return ChatCompletionResponse(
+            id="chatcmpl-static-success",
+            created=123,
+            model=request.model,
+            provider={"id": self.id, "type": self.type, "actual_model": request.model},
+            choices=[{"index": 0, "message": {"role": "assistant", "content": "static fallback success"}, "finish_reason": "stop"}],
+            usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        )
+
+    async def stream_chat_completion(self, request: ChatCompletionRequest, stream_control=None):
+        yield b""
+
+    def convert_request(self, openai_request: ChatCompletionRequest):
+        return {}
+
+    def convert_response(self, provider_response, model: str) -> ChatCompletionResponse:
+        raise NotImplementedError
+
+    def convert_stream_chunk(self, provider_chunk: bytes):
+        return provider_chunk
+
+    def normalize_error(self, error):
+        if isinstance(error, GatewayError):
+            return error
+        return GatewayError(str(error))
+
+
 @pytest.fixture
 def registry_backup():
     previous = dict(registry.get_all_instances())
@@ -149,6 +196,42 @@ async def test_router_tracks_key_usage_and_quota_exhaustion(registry_backup, iso
     assert stored_key.status == "quota_exhausted"
     assert stored_key.last_status_message == "Quota exhausted for this key. Upgrade for higher limits."
     assert stored_key.exhausted_at is not None
+
+
+@pytest.mark.asyncio
+async def test_router_falls_back_to_static_key_after_dynamic_key_exhaustion(registry_backup, isolated_storage):
+    isolated_storage.add_key("openrouter", "dynamic-key")
+
+    registry._active_instances = {
+        "openrouter-primary": DynamicThenStaticProvider(
+            id="openrouter-primary",
+            type="openrouter",
+            supported_models=["openai/gpt-4o-mini"],
+            api_key="static-key",
+        )
+    }
+
+    alias_manager = ModelAliasManager(
+        {
+            "default": {
+                "candidates": [
+                    {"provider": "openrouter-primary", "model": "openai/gpt-4o-mini"},
+                ]
+            }
+        }
+    )
+    router = Router(alias_manager, {})
+
+    response = await router.route(
+        ChatCompletionRequest(
+            model="default",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+    )
+
+    assert response.choices[0].message.content == "static fallback success"
+    stored_key = isolated_storage.get_all_keys()[0]
+    assert stored_key.status == "quota_exhausted"
 
 
 def test_admin_key_summary_includes_current_key_and_call_counts(isolated_storage):

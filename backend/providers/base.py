@@ -40,7 +40,8 @@ class BaseProvider(ABC):
         self.type = type
         self.enabled = enabled
         self.priority = priority
-        self.supported_models = supported_models or []
+        configured_models = kwargs.get("models") or []
+        self.supported_models = supported_models or configured_models or []
         self.supports_streaming = supports_streaming
         self.max_concurrent_requests = max_concurrent_requests
         self.timeout_seconds = timeout_seconds
